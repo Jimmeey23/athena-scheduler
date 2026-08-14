@@ -1,0 +1,207 @@
+import { useState, type ReactNode } from "react";
+import { Copy, Search, Trash2, UserRound } from "lucide-react";
+import { DAYS, TAG_META, TRAINERS, trainerById, trainerLoad } from "./data";
+import { slotHistory } from "./engine";
+import type { Session, Tag } from "./types";
+
+export function ScoreRing({ score, size = 36 }: { score: number; size?: number }) {
+  const r = size * 0.38;
+  const c = 2 * Math.PI * r;
+  const color = score >= 80 ? "#16a34a" : score >= 65 ? "#005eed" : "#e05a3c";
+  return (
+    <svg width={size} height={size} className="shrink-0">
+      <circle cx={size / 2} cy={size / 2} r={r} stroke="rgba(14,23,41,0.1)" strokeWidth="2.5" fill="none" />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        stroke={color}
+        strokeWidth="2.5"
+        fill="none"
+        strokeDasharray={c}
+        strokeDashoffset={c * (1 - score / 100)}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+      <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle" fill="#0e1729" fontSize={size < 34 ? 8 : 10} fontWeight="600" fontFamily="Outfit, sans-serif">
+        {score}
+      </text>
+    </svg>
+  );
+}
+
+export function TagChip({ tag }: { tag: Tag }) {
+  const meta = TAG_META[tag];
+  return <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium tracking-wide ring-1 ring-inset ${meta.cls}`}>{meta.label}</span>;
+}
+
+export function FillBar({ fill }: { fill: number }) {
+  const color = fill >= 70 ? "#005eed" : fill >= 40 ? "#0e1729" : "#e05a3c";
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1 flex-1 overflow-hidden rounded-full bg-line">
+        <div className="h-full rounded-full" style={{ width: `${fill}%`, background: color }} />
+      </div>
+      <span className="w-8 text-right text-[10px] tabular-nums text-mist">{fill}%</span>
+    </div>
+  );
+}
+
+export type CardActions = {
+  onSelect: (s: Session) => void;
+  onSwap?: (s: Session) => void;
+  onRemove?: (s: Session) => void;
+  onCopy?: (s: Session) => void;
+  onSimilar?: (s: Session) => void;
+};
+
+export function ClassCard({
+  session,
+  dimmed,
+  pinned,
+  weekHours,
+  actions,
+}: {
+  session: Session;
+  dimmed?: boolean;
+  pinned?: boolean;
+  weekHours?: number;
+  actions: CardActions;
+}) {
+  const trainer = trainerById(session.trainerId);
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/session-id", session.id);
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      className={`ticket group relative w-full cursor-grab rounded-2xl p-3 text-left transition ${dimmed ? "opacity-30" : ""} ${
+        session.tags.includes("violation") ? "ring-1 ring-red-300" : "ring-1 ring-line hover:ring-[#005eed]/40"
+      }`}
+    >
+      <button className="w-full text-left" onClick={() => actions.onSelect(session)}>
+        <span className="absolute inset-y-3 left-0 w-0.5 rounded-full" style={{ background: session.accent }} />
+        <div className="flex items-start justify-between gap-2 pl-1.5">
+          <div className="min-w-0">
+            <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-mist">{session.studio}</p>
+            <p className="mt-0.5 truncate text-[13px] font-medium text-ivory">{session.name}</p>
+          </div>
+          <ScoreRing score={session.score} />
+        </div>
+        <div className="mt-2.5 flex items-center gap-2 pl-1.5">
+          <img src={trainer.photo} alt="" className="h-6 w-6 rounded-full object-cover ring-1 ring-line" />
+          <span className="min-w-0 flex-1 truncate text-[11px] text-ivory/80">{trainer.name}</span>
+          <span className="text-[10px] tabular-nums text-mist">{session.time}</span>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-1 pl-1.5 text-[10px] text-mist">
+          <span className="rounded-full bg-ink px-1.5 py-0.5">{weekHours ?? 0}h</span>
+          <span className="rounded-full bg-ink px-1.5 py-0.5">{session.fill}%</span>
+          {session.oneOff && <span className="rounded-full bg-rose-50 px-1.5 py-0.5 text-rose-700">One-off</span>}
+          {pinned && <span className="rounded-full bg-[#005eed]/10 px-1.5 py-0.5 text-[#005eed]">Pinned</span>}
+        </div>
+        <div className="mt-2 pl-1.5">
+          <FillBar fill={session.fill} />
+          <div className="mt-1 flex justify-between text-[9px] uppercase tracking-wider text-mist">
+            <span>Fill {session.fill}%</span>
+            <span>Avg {session.avg.toFixed(1)}</span>
+          </div>
+        </div>
+      </button>
+      <div className="pointer-events-none absolute inset-x-2 top-2 z-10 flex justify-end gap-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
+        <IconBtn title="Change trainer" onClick={() => actions.onSwap?.(session)}>
+          <UserRound className="h-3 w-3" />
+        </IconBtn>
+        <IconBtn title="Copy card" onClick={() => actions.onCopy?.(session)}>
+          <Copy className="h-3 w-3" />
+        </IconBtn>
+        <IconBtn title="Find similar" onClick={() => actions.onSimilar?.(session)}>
+          <Search className="h-3 w-3" />
+        </IconBtn>
+        <IconBtn title="Remove class" onClick={() => actions.onRemove?.(session)}>
+          <Trash2 className="h-3 w-3" />
+        </IconBtn>
+      </div>
+    </div>
+  );
+}
+
+function IconBtn({ title, onClick, children }: { title: string; onClick?: () => void; children: ReactNode }) {
+  return (
+    <button
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick?.();
+      }}
+      className="rounded-lg bg-white p-1.5 text-[#0e1729] shadow ring-1 ring-line hover:bg-[#005eed] hover:text-white"
+    >
+      {children}
+    </button>
+  );
+}
+
+export function EmptySlot({
+  locationId,
+  day,
+  time,
+  onAdd,
+}: {
+  locationId: string;
+  day: number;
+  time: string;
+  onAdd?: (opt: { name: string; trainerId: string }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const hist = open ? slotHistory(locationId, day, time).slice(0, 4) : [];
+  return (
+    <div className="group relative min-h-[72px] rounded-2xl border border-dashed border-line" onMouseEnter={() => setOpen(true)}>
+      <div className="pointer-events-none invisible absolute left-0 top-full z-30 w-[260px] pt-1 group-hover:visible group-hover:pointer-events-auto">
+        <div className="rounded-2xl border border-line bg-white p-3 shadow-xl">
+          <p className="text-[10px] uppercase tracking-wider text-mist">
+            Historic {DAYS[day].label} {time}
+          </p>
+          {hist.length === 0 && <p className="mt-2 text-xs text-mist">No proven combo for this slot.</p>}
+          {hist.map((h) => {
+            const t = trainerById(h.trainerId);
+            return (
+              <button
+                key={h.name + h.trainerId}
+                onClick={() => onAdd?.({ name: h.name, trainerId: h.trainerId })}
+                className="mt-2 flex w-full items-start justify-between rounded-xl bg-ink px-2 py-1.5 text-left text-[11px] hover:ring-1 hover:ring-[#005eed]/30"
+              >
+                <span>
+                  <span className="block font-medium text-ivory">{h.name}</span>
+                  <span className="text-mist">{t.name}</span>
+                </span>
+                <span className="text-right text-mist">
+                  {h.fill}% · {h.checkin} avg
+                  <span className="block">{h.sessions} sessions</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function Panel({ className = "", children }: { className?: string; children: ReactNode }) {
+  return <div className={`panel rounded-3xl ${className}`}>{children}</div>;
+}
+
+export function trainerWeekHours(all: Session[], trainerId: string) {
+  return Number(trainerLoad(all).find((t) => t.id === trainerId)?.hours ?? 0);
+}
+
+export function topTrainersFor(all: Session[], locationId: string, day: number, time: string, className: string) {
+  return TRAINERS.filter((t) => t.active && t.access[locationId]?.days.includes(day))
+    .map((t) => {
+      const hours = trainerWeekHours(all, t.id);
+      const hist = slotHistory(locationId, day, time).find((h) => h.trainerId === t.id && h.name === className);
+      return { trainer: t, hours, score: hist?.score ?? 40, fill: hist?.fill ?? 0, checkin: hist?.checkin ?? 0, sessions: hist?.sessions ?? 0 };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
+}
