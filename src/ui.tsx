@@ -24,7 +24,7 @@ export function ScoreRing({ score, size = 36 }: { score: number; size?: number }
         transform={`rotate(-90 ${size / 2} ${size / 2})`}
       />
       <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle" fill="#0e1729" fontSize={size < 34 ? 8 : 10} fontWeight="600" fontFamily="Outfit, sans-serif">
-        {score}
+        {score > 0 ? score : "—"}
       </text>
     </svg>
   );
@@ -71,6 +71,7 @@ export function ClassCard({
   compact?: boolean;
 }) {
   const trainer = trainerById(session.trainerId);
+  const hasSheetHistory = session.sessions > 0;
   if (compact) {
     return (
       <div
@@ -79,20 +80,57 @@ export function ClassCard({
           e.dataTransfer.setData("text/session-id", session.id);
           e.dataTransfer.effectAllowed = "move";
         }}
-        className={`ticket group relative w-full cursor-grab overflow-hidden rounded-xl p-2 text-left transition ${dimmed ? "opacity-30" : ""} ${
+        className={`ticket group relative w-full cursor-grab overflow-hidden rounded-xl p-2 text-left transition hover:shadow-lg ${dimmed ? "opacity-30" : ""} ${
           session.tags.includes("violation") ? "ring-1 ring-red-300" : "ring-1 ring-line hover:ring-[#005eed]/40"
         }`}
       >
         <button className="w-full text-left" onClick={() => actions.onSelect(session)}>
           <span className="absolute inset-y-2 left-0 w-0.5 rounded-full" style={{ background: session.accent }} />
-          <p className="truncate pl-1.5 text-[11px] font-medium leading-tight text-ivory">{session.name}</p>
-          <div className="mt-1 flex items-center gap-1 pl-1.5">
+          <div className="flex items-start justify-between gap-1 pl-1.5">
+            <div className="min-w-0">
+              <p className="truncate text-[11px] font-medium leading-tight text-ivory">{session.name}</p>
+              <p className="mt-0.5 truncate text-[8px] uppercase tracking-[0.12em] text-mist">{session.studio}</p>
+            </div>
+            <span className="shrink-0 rounded-full bg-white px-1.5 py-0.5 text-[9px] font-semibold text-[#0e1729] ring-1 ring-line">{session.score || "—"}</span>
+          </div>
+          <div className="mt-1.5 flex items-center gap-1 pl-1.5">
             <img src={trainer.photo} alt="" className="h-4 w-4 shrink-0 rounded-full object-cover ring-1 ring-line" />
             <span className="min-w-0 flex-1 truncate text-[9px] text-ivory/70">{trainer.name.split(" ")[0]}</span>
-            <span className="shrink-0 text-[9px] font-medium tabular-nums text-mist">{session.fill}%</span>
+            <span className="shrink-0 text-[9px] tabular-nums text-mist">{session.time}</span>
+          </div>
+          <div className="max-h-0 overflow-hidden pl-1.5 opacity-0 transition-all duration-200 group-hover:max-h-40 group-hover:pt-2 group-hover:opacity-100">
+            {hasSheetHistory ? (
+              <>
+                <FillBar fill={session.fill} />
+                <div className="mt-2 grid grid-cols-2 gap-1">
+                  <MetricPill label="Avg" value={session.avg.toFixed(1)} />
+                  <MetricPill label="Fill" value={`${session.fill}%`} />
+                  <MetricPill label="Sessions" value={String(session.sessions)} />
+                  <MetricPill label="Checked In" value={String(Math.round(session.avg * session.sessions))} />
+                </div>
+              </>
+            ) : (
+              <p className="text-[9px] uppercase tracking-wider text-mist">No matching history</p>
+            )}
+            <div className="mt-1 flex flex-wrap gap-1 text-[9px] text-mist">
+              <span className="rounded-full bg-ink px-1.5 py-0.5">{weekHours ?? 0}h</span>
+              <span className="rounded-full bg-ink px-1.5 py-0.5">{hasSheetHistory ? `${session.fill}%` : "—"}</span>
+              {session.oneOff && <span className="rounded-full bg-rose-50 px-1.5 py-0.5 text-rose-700">One-off</span>}
+              {pinned && <span className="rounded-full bg-[#005eed]/10 px-1.5 py-0.5 text-[#005eed]">Pinned</span>}
+            </div>
+          </div>
+          <div className="mt-1 flex items-center justify-between pl-1.5 group-hover:hidden">
+            <span className="text-[9px] text-mist">{hasSheetHistory ? `${session.fill}% fill` : "No hist"}</span>
+            <span className="shrink-0 text-[9px] font-medium tabular-nums text-mist">{hasSheetHistory ? `${session.sessions} runs` : "—"}</span>
           </div>
         </button>
-        <div className="pointer-events-none absolute inset-x-1 top-1 flex justify-end opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
+        <div className="pointer-events-none absolute inset-x-1 top-1 z-10 flex justify-end gap-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
+          <IconBtn title="Change trainer" onClick={() => actions.onSwap?.(session)}>
+            <UserRound className="h-2.5 w-2.5" />
+          </IconBtn>
+          <IconBtn title="Find similar" onClick={() => actions.onSimilar?.(session)}>
+            <Search className="h-2.5 w-2.5" />
+          </IconBtn>
           <IconBtn title="Remove class" onClick={() => actions.onRemove?.(session)}>
             <Trash2 className="h-2.5 w-2.5" />
           </IconBtn>
@@ -127,16 +165,22 @@ export function ClassCard({
         </div>
         <div className="mt-2 flex flex-wrap gap-1 pl-1.5 text-[10px] text-mist">
           <span className="rounded-full bg-ink px-1.5 py-0.5">{weekHours ?? 0}h</span>
-          <span className="rounded-full bg-ink px-1.5 py-0.5">{session.fill}%</span>
+          <span className="rounded-full bg-ink px-1.5 py-0.5">{hasSheetHistory ? `${session.fill}%` : "No sheet hist"}</span>
           {session.oneOff && <span className="rounded-full bg-rose-50 px-1.5 py-0.5 text-rose-700">One-off</span>}
           {pinned && <span className="rounded-full bg-[#005eed]/10 px-1.5 py-0.5 text-[#005eed]">Pinned</span>}
         </div>
         <div className="mt-2 pl-1.5">
-          <FillBar fill={session.fill} />
-          <div className="mt-1 flex justify-between text-[9px] uppercase tracking-wider text-mist">
-            <span>Fill {session.fill}%</span>
-            <span>Avg {session.avg.toFixed(1)}</span>
-          </div>
+          {hasSheetHistory ? (
+            <>
+              <FillBar fill={session.fill} />
+              <div className="mt-1 flex justify-between text-[9px] uppercase tracking-wider text-mist">
+                <span>Fill {session.fill}%</span>
+                <span>Avg {session.avg.toFixed(1)}</span>
+              </div>
+            </>
+          ) : (
+            <p className="text-[9px] uppercase tracking-wider text-mist">No matching history</p>
+          )}
         </div>
       </button>
       <div className="pointer-events-none absolute inset-x-2 top-2 z-10 flex justify-end gap-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
@@ -154,6 +198,15 @@ export function ClassCard({
         </IconBtn>
       </div>
     </div>
+  );
+}
+
+function MetricPill({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="rounded-lg bg-white px-2 py-1 ring-1 ring-[#005eed]/15">
+      <span className="block text-[7px] font-semibold uppercase tracking-[0.12em] text-mist">{label}</span>
+      <span className="block text-[10px] font-semibold tabular-nums text-[#005eed]">{value}</span>
+    </span>
   );
 }
 

@@ -246,59 +246,87 @@ const LOC_CODE: Record<string, { code: string; city: string }> = {
 
 export function MultiView({ all, actions, onOpenCreate }: { all: Session[]; actions: CardActions; onOpenCreate?: (locationId: string, day: number, time: string) => void }) {
   const times = [...new Set([...TIMES, ...all.map((s) => s.time)])].sort();
+  const [visibleLocationIds, setVisibleLocationIds] = useState(() => LOCATIONS.map((l) => l.id));
+  const visibleLocations = LOCATIONS.filter((l) => visibleLocationIds.includes(l.id));
+  const locationCount = Math.max(visibleLocations.length, 1);
+  const laneWidth = 190;
+  const gridTemplateColumns = `88px repeat(${DAYS.length * locationCount}, minmax(${laneWidth}px, ${laneWidth}px))`;
+  const minWidth = 88 + DAYS.length * locationCount * laneWidth;
+  const toggleLocation = (id: string) => {
+    setVisibleLocationIds((ids) => {
+      if (ids.includes(id)) return ids.length === 1 ? ids : ids.filter((x) => x !== id);
+      return [...ids, id];
+    });
+  };
   return (
     <div className="overflow-auto pb-8">
-      <h2 className="mb-4 text-2xl font-semibold tracking-tight">Multi-Location Schedule</h2>
-      <div className="min-w-[2000px] rounded-3xl border border-line bg-white">
-        <div className="grid" style={{ gridTemplateColumns: `88px repeat(7, minmax(240px, 1fr))` }}>
-          <div className="sticky left-0 z-20 border-b border-r border-line bg-white px-2 py-3 text-[11px] font-semibold uppercase text-mist">Time</div>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-2xl font-semibold tracking-tight">Multi-Location Schedule</h2>
+        <div className="flex flex-wrap gap-1.5 rounded-2xl bg-white p-1 ring-1 ring-line">
+          {LOCATIONS.map((l) => {
+            const active = visibleLocationIds.includes(l.id);
+            return (
+              <button
+                key={l.id}
+                onClick={() => toggleLocation(l.id)}
+                className={`rounded-xl px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] transition ${
+                  active ? "bg-[#005eed] text-white shadow-sm" : "text-mist hover:bg-ink hover:text-[#0e1729]"
+                }`}
+              >
+                {LOC_CODE[l.id]?.code || l.id.slice(0, 2)}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="rounded-3xl border border-line bg-white" style={{ minWidth }}>
+        <div className="grid" style={{ gridTemplateColumns }}>
+          <div className="sticky left-0 top-0 z-40 row-span-2 border-b border-r border-line bg-white px-2 py-3 text-[11px] font-semibold uppercase text-mist">Time</div>
           {DAYS.map((d) => (
-            <div key={d.key} className="border-b border-l border-line px-2 py-3">
+            <div key={d.key} className="sticky top-0 z-30 border-b border-l border-line bg-white px-3 py-3" style={{ gridColumn: `span ${locationCount}` }}>
               <div className="flex items-baseline gap-2">
                 <span className="text-sm font-bold">{d.label}</span>
                 <span className="text-xs text-mist">{d.full}</span>
                 <span className="rounded-full bg-[#eef4ff] px-2 text-[11px] font-semibold text-[#005eed]">{all.filter((s) => s.day === d.key).length}</span>
               </div>
-              <div className="mt-2 grid grid-cols-5 gap-1 text-center text-[9px] font-semibold uppercase text-mist">
-                {LOCATIONS.map((l) => (
-                  <div key={l.id}>
-                    <div>{LOC_CODE[l.id]?.city || "CITY"}</div>
-                    <div className="text-[#0e1729]">
-                      {LOC_CODE[l.id]?.code || l.id.slice(0, 2).toUpperCase()} ({all.filter((s) => s.day === d.key && s.locationId === l.id).length})
-                    </div>
-                  </div>
-                ))}
-              </div>
             </div>
           ))}
+          {DAYS.flatMap((d) =>
+            visibleLocations.map((l) => (
+              <div key={`${d.key}-${l.id}`} className="sticky top-[45px] z-30 border-b border-l border-line bg-[#fafafa] px-2 py-2 text-center text-[9px] font-semibold uppercase text-mist">
+                <div>{LOC_CODE[l.id]?.city || "CITY"}</div>
+                <div className="text-[#0e1729]">
+                  {LOC_CODE[l.id]?.code || l.id.slice(0, 2).toUpperCase()} ({all.filter((s) => s.day === d.key && s.locationId === l.id).length})
+                </div>
+              </div>
+            ))
+          )}
           {times.map((time) => (
             <div key={time} className="contents">
               <div className="sticky left-0 z-20 border-t border-r border-line bg-white py-4 pr-2 text-right">
                 <div className="text-sm font-bold text-[#c2410c]">{time}</div>
                 <div className="text-[9px] uppercase text-mist">{time < "12:00" ? "Prime" : time < "17:00" ? "Mid" : "Eve"}</div>
               </div>
-              {DAYS.map((d) => (
-                <div key={d.key} className="grid grid-cols-5 gap-1 border-l border-t border-line bg-[#fafafa] p-1">
-                  {LOCATIONS.map((l) => {
+              {DAYS.flatMap((d) =>
+                visibleLocations.map((l) => {
                     const cards = all.filter((s) => s.day === d.key && s.time === time && s.locationId === l.id);
                     return (
-                      <div key={l.id} className="min-w-0 space-y-1 rounded-lg">
+                      <div key={`${time}-${d.key}-${l.id}`} className="min-w-0 space-y-2 border-l border-t border-line bg-[#fafafa] p-2">
                         {cards.map((s) => (
                           <ClassCard key={s.id} session={s} compact weekHours={trainerWeekHours(all, s.trainerId)} actions={actions} />
                         ))}
                         {!cards.length && (
                           <button
                             onClick={() => onOpenCreate?.(l.id, d.key, time)}
-                            className="flex h-[52px] w-full items-center justify-center rounded-lg text-base text-mist/30 hover:bg-white hover:text-[#005eed]"
+                            className="flex min-h-[72px] w-full items-center justify-center rounded-xl text-base text-mist/30 hover:bg-white hover:text-[#005eed] hover:ring-1 hover:ring-line"
                           >
                             +
                           </button>
                         )}
                       </div>
                     );
-                  })}
-                </div>
-              ))}
+                  })
+              )}
             </div>
           ))}
         </div>

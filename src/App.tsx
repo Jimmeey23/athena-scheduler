@@ -33,7 +33,7 @@ import {
 } from "./data";
 import type { Session, Settings, ViewId } from "./types";
 import { topTrainersFor } from "./ui";
-import { generateSchedule, hasConflict, historicFor, scoreCombo, slotHistory } from "./engine";
+import { generateSchedule, hasConflict, historicFor, refreshSessionMetrics, scoreCombo, slotHistory } from "./engine";
 import { FORMATS } from "./data";
 import { loadSettings, saveSettings } from "./settings";
 import { loadCurrentSchedule, loadDrafts, pushDraft, saveCurrentSchedule } from "./drafts";
@@ -42,7 +42,7 @@ import { SettingsView } from "./SettingsView";
 import { ClassModal } from "./ClassModal";
 import { CreateClassModal } from "./CreateClassModal";
 import { Chatbot } from "./Chatbot";
-import { loadSnapshotCsv, setPerformanceRows } from "./performance";
+import { hasPerformance, loadSnapshotCsv, setPerformanceRows } from "./performance";
 import { loadCloud, persistCloud, persistSchedule, loadSchedule, finalizeSchedule } from "./supabase";
 import { recordOverride } from "./overrides";
 import { exportCSV, exportHTML, exportJSON, exportPDF, exportPNG } from "./export";import {
@@ -141,17 +141,23 @@ export default function App() {
       .then((rows) => {
         setPerformanceRows(rows);
         setPerfCount(rows.length);
+        setBundle((b) => {
+          const refreshed = { ...b, sessions: refreshSessionMetrics(b.sessions, settings) };
+          saveCurrentSchedule(refreshed);
+          return refreshed;
+        });
       })
       .catch(() => setPerfCount(0));
-  }, []);
+  }, [settings]);
 
   useEffect(() => {
     // Supabase is the cross-device source of truth for "the most recently generated schedule".
     loadSchedule()
       .then((cloud) => {
         if (cloud) {
-          setBundle(cloud);
-          saveCurrentSchedule(cloud);
+          const next = hasPerformance() ? { ...cloud, sessions: refreshSessionMetrics(cloud.sessions, settings) } : cloud;
+          setBundle(next);
+          saveCurrentSchedule(next);
         }
       })
       .catch(() => {
@@ -285,6 +291,8 @@ export default function App() {
     if (!format || !trainer) return;
     const h = historicFor(locationId, opt.day, opt.time, format.name, trainer.id);
     const sc = scoreCombo(h, trainer, settings, format.name);
+    const room = locationById(locationId).roomTypes?.[format.family] ?? format.studio;
+    const capacity = locationById(locationId).roomCapacity?.[room] ?? 18;
     setSessions([
       ...bundle.sessions,
       {
@@ -293,7 +301,7 @@ export default function App() {
         day: opt.day,
         time: opt.time,
         name: format.name,
-        studio: format.studio,
+        studio: room,
         duration: format.duration,
         trainerId: trainer.id,
         score: sc.score,
@@ -303,7 +311,7 @@ export default function App() {
         oneOff: sc.oneOff,
         reason: `Added from historic slot options. ${trainer.name} averages ${h.checkin} check-ins and ${h.fill}% fill over ${h.sessions} sessions.`,
         breakdown: sc.breakdown,
-        capacity: 18,
+        capacity,
         tags: ["new"],
         accent: format.accent,
       },
@@ -320,13 +328,15 @@ export default function App() {
     }
     const h = historicFor(loc, day, time, format.name, trainer.id);
     const sc = scoreCombo(h, trainer, settings, format.name);
+    const room = locationById(loc).roomTypes?.[format.family] ?? format.studio;
+    const capacity = locationById(loc).roomCapacity?.[room] ?? 18;
     const session: Session = {
       id: `${loc}-${day}-${time}-${format.name.replace(/\s+/g, "-").toLowerCase()}-${trainer.id}-${Date.now()}`,
       locationId: loc,
       day,
       time,
       name: format.name,
-      studio: format.studio,
+      studio: room,
       duration: format.duration,
       trainerId: trainer.id,
       score: sc.score,
@@ -338,7 +348,7 @@ export default function App() {
         ? `Manually created and pinned \u2014 protected from future regenerations.`
         : `Manually created for this week only.`,
       breakdown: sc.breakdown,
-      capacity: 18,
+      capacity,
       tags: recurring ? ["protected", "new"] : ["new"],
       accent: format.accent,
       pinned: recurring,
@@ -664,8 +674,15 @@ export default function App() {
       {kpiKey && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setKpiKey(null)}>
           <div className="w-full max-w-3xl rounded-3xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <p className="text-[10px] uppercase text-mist">Metric drill-down</p>
-            <h3 className="font-serif text-3xl">{kpis.find((k) => k.key === kpiKey)?.label}</h3>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[10px] uppercase text-mist">Metric drill-down</p>
+                <h3 className="font-serif text-3xl">{kpis.find((k) => k.key === kpiKey)?.label}</h3>
+              </div>
+              <button onClick={() => setKpiKey(null)} className="rounded-xl p-2 text-mist hover:bg-ink hover:text-ivory" aria-label="Close metric drill-down">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
             <p className="mt-1 font-serif text-5xl text-[#005eed]">{kpis.find((k) => k.key === kpiKey)?.value}</p>
             <p className="mt-2 text-sm text-mist">{kpis.find((k) => k.key === kpiKey)?.hint}</p>
             <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -743,18 +760,37 @@ export default function App() {
       {swapFor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setSwapFor(null)}>
           <div className="max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <p className="text-[10px] uppercase tracking-wider text-mist">Replace trainer</p>
-            <h3 className="font-serif text-2xl">{swapFor.name}</h3>
-            <p className="text-sm text-mist">
-              {DAYS[swapFor.day].label} {swapFor.time} · current {trainerById(swapFor.trainerId).name}
-            </p>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-mist">Replace trainer</p>
+                <h3 className="font-serif text-2xl">{swapFor.name}</h3>
+                <p className="text-sm text-mist">
+                  {DAYS[swapFor.day].label} {swapFor.time} · current {trainerById(swapFor.trainerId).name}
+                </p>
+              </div>
+              <button onClick={() => setSwapFor(null)} className="rounded-xl p-2 text-mist hover:bg-ink hover:text-ivory" aria-label="Close trainer replacement">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
             <div className="mt-4 space-y-2">
               {topTrainersFor(all, swapFor.locationId, swapFor.day, swapFor.time, swapFor.name).map((c, i) => (
                 <button
                   key={c.trainer.id}
                   onClick={() => {
                     recordOverride(swapFor.locationId, swapFor.day, swapFor.time, swapFor.name, swapFor.trainerId, c.trainer.id);
-                    setSessions(bundle.sessions.map((s) => (s.id === swapFor.id ? { ...s, trainerId: c.trainer.id, reason: `Manual swap to ${c.trainer.name}` } : s)));
+                    const h = historicFor(swapFor.locationId, swapFor.day, swapFor.time, swapFor.name, c.trainer.id);
+                    const sc = scoreCombo(h, c.trainer, settings, swapFor.name);
+                    setSessions(bundle.sessions.map((s) => (s.id === swapFor.id ? {
+                      ...s,
+                      trainerId: c.trainer.id,
+                      score: sc.score,
+                      fill: h.fill,
+                      avg: h.checkin,
+                      sessions: h.sessions,
+                      oneOff: sc.oneOff,
+                      breakdown: sc.breakdown,
+                      reason: `Manual swap to ${c.trainer.name}. Historic fit: ${h.checkin} avg check-ins, ${h.fill}% fill across ${h.sessions} sessions.`,
+                    } : s)));
                     setSwapFor(null);
                   }}
                   className="flex w-full items-center gap-3 rounded-2xl bg-ink px-3 py-2 text-left"
@@ -779,7 +815,12 @@ export default function App() {
       {dayModal != null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setDayModal(null)}>
           <div className="max-h-[80vh] w-full max-w-2xl overflow-auto rounded-3xl bg-white p-5" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-serif text-2xl">{DAYS[dayModal].full} at {location.name}</h3>
+            <div className="flex items-start justify-between gap-4">
+              <h3 className="font-serif text-2xl">{DAYS[dayModal].full} at {location.name}</h3>
+              <button onClick={() => setDayModal(null)} className="rounded-xl p-2 text-mist hover:bg-ink hover:text-ivory" aria-label="Close day mix">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
             {(() => {
               const day = sessions.filter((s) => s.day === dayModal);
               const shifts: Array<"am" | "pm"> = ["am", "pm"];
@@ -821,7 +862,12 @@ export default function App() {
       {timeModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setTimeModal(null)}>
           <div className="max-h-[80vh] w-full max-w-2xl overflow-auto rounded-3xl bg-white p-5" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-serif text-2xl">{timeModal} mix · {location.name}</h3>
+            <div className="flex items-start justify-between gap-4">
+              <h3 className="font-serif text-2xl">{timeModal} mix · {location.name}</h3>
+              <button onClick={() => setTimeModal(null)} className="rounded-xl p-2 text-mist hover:bg-ink hover:text-ivory" aria-label="Close time mix">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
             <table className="mt-3 w-full text-left text-xs">
               <thead>
                 <tr className="uppercase text-mist"><th className="py-2">Day</th><th>Class</th><th>Trainer</th><th>Fill</th></tr>
@@ -840,8 +886,15 @@ export default function App() {
       {similarFor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setSimilarFor(null)}>
           <div className="max-h-[80vh] w-full max-w-lg overflow-auto rounded-3xl bg-white p-5" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-serif text-2xl">Better options at {similarFor.time}</h3>
-            <p className="text-sm text-mist">Not limited to the same format or trainer — ranked by historic fill and attendance.</p>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-serif text-2xl">Better options at {similarFor.time}</h3>
+                <p className="text-sm text-mist">Not limited to the same format or trainer — ranked by historic fill and attendance.</p>
+              </div>
+              <button onClick={() => setSimilarFor(null)} className="rounded-xl p-2 text-mist hover:bg-ink hover:text-ivory" aria-label="Close better options">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
             <div className="mt-3 space-y-2">
               {slotHistory(similarFor.locationId, similarFor.day, similarFor.time)
                 .filter((h) => h.score >= similarFor.score - 5)
@@ -852,7 +905,27 @@ export default function App() {
                     onClick={() => {
                       const format = FORMATS.find((f) => f.name === h.name);
                       if (!format) return;
-                      setSessions(bundle.sessions.map((s) => s.id === similarFor.id ? { ...s, name: h.name, trainerId: h.trainerId, score: h.score, fill: h.fill, avg: h.checkin, studio: format.studio, reason: `Swapped to a stronger historic option: ${h.name}` } : s));
+                      const trainer = TRAINERS.find((t) => t.id === h.trainerId);
+                      const hist = historicFor(similarFor.locationId, similarFor.day, similarFor.time, h.name, h.trainerId);
+                      const sc = trainer ? scoreCombo(hist, trainer, settings, h.name) : { score: h.score, oneOff: h.oneOff, breakdown: similarFor.breakdown };
+                      const room = locationById(similarFor.locationId).roomTypes?.[format.family] ?? format.studio;
+                      const capacity = locationById(similarFor.locationId).roomCapacity?.[room] ?? similarFor.capacity;
+                      setSessions(bundle.sessions.map((s) => s.id === similarFor.id ? {
+                        ...s,
+                        name: h.name,
+                        trainerId: h.trainerId,
+                        score: sc.score,
+                        fill: hist.fill,
+                        avg: hist.checkin,
+                        sessions: hist.sessions,
+                        oneOff: sc.oneOff,
+                        breakdown: sc.breakdown,
+                        studio: room,
+                        duration: format.duration,
+                        capacity,
+                        accent: format.accent,
+                        reason: `Swapped to a stronger historic option: ${h.name}. Historic fit: ${hist.checkin} avg check-ins, ${hist.fill}% fill across ${hist.sessions} sessions.`,
+                      } : s));
                       setSimilarFor(null);
                     }}
                     className="flex w-full justify-between rounded-2xl bg-ink px-3 py-2 text-left text-sm"
@@ -880,8 +953,15 @@ export default function App() {
       {aiOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[#0e1729]/70 backdrop-blur-md">
           <div className="w-[min(520px,92vw)] rounded-[28px] bg-white p-8 shadow-2xl">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#005eed]">Scoring · ranking · packing</p>
-            <h3 className="mt-2 font-serif text-3xl">Building the week</h3>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#005eed]">Scoring · ranking · packing</p>
+                <h3 className="mt-2 font-serif text-3xl">Building the week</h3>
+              </div>
+              <button onClick={() => setAiOpen(false)} className="rounded-xl p-2 text-mist hover:bg-ink hover:text-ivory" aria-label="Close generation progress">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
             <p className="mt-1 text-sm text-mist">About two minutes — enough time to test trainer clusters, fill Supreme, and drop conflicts.</p>
             <div className="mt-5 h-2 overflow-hidden rounded-full bg-ink">
               <div className="h-full rounded-full bg-[#005eed] transition-all" style={{ width: `${Math.min(100, (aiStep / AI_STEPS.length) * 100)}%` }} />

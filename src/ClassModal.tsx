@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Award, Ban, Clock3, Pin, ShieldCheck, X } from "lucide-react";
 import { DAYS, FORMATS, locationById, trainerById, trainerLoad } from "./data";
 import { historicFor, slotHistory } from "./engine";
-import { getPerformanceRows, topTrainersForClass } from "./performance";
+import { aggregate, getPerformanceHeaders, lookupExactAgg, lookupExactRows, lookupSlotFormatAgg, lookupSlotFormatRows } from "./performance";
+import type { PerfRow } from "./performance";
 import type { Session } from "./types";
 import { FillBar, Panel, ScoreRing, TagChip, trainerWeekHours } from "./ui";
 
@@ -20,11 +21,17 @@ export function ClassModal({ session, all, onClose }: { session: Session; all: S
   const hist = slotHistory(session.locationId, session.day, session.time);
   const sameClass = all.filter((s) => s.name === session.name);
   const loadByHouse = locHours(all, trainer.id);
-  // Every historic instance of this exact class format, across all trainers/locations/dates — not just this slot.
-  const classGroupRows = getPerformanceRows()
-    .filter((r) => r.className.toLowerCase() === session.name.toLowerCase())
-    .sort((a, b) => b.date.localeCompare(a.date));
-  const topTrainers = topTrainersForClass(session.name, 3);
+  const exactCombo = lookupExactAgg(session.locationId, session.day, session.time, session.name, trainer.name);
+  const exactSlotFormat = lookupSlotFormatAgg(session.locationId, session.day, session.time, session.name);
+  const slotFormatRows = [...lookupSlotFormatRows(session.locationId, session.day, session.time, session.name)].sort((a, b) => b.date.localeCompare(a.date));
+  const trainerSlotRows = [...lookupExactRows(session.locationId, session.day, session.time, session.name, trainer.name)].sort((a, b) => b.date.localeCompare(a.date));
+  const rawHeaders = getPerformanceHeaders();
+  const slotByTrainer = [...slotFormatRows.reduce((map, row) => {
+    const rows = map.get(row.trainer) || [];
+    rows.push(row);
+    map.set(row.trainer, rows);
+    return map;
+  }, new Map<string, typeof slotFormatRows>())].map(([name, rows]) => ({ name, agg: aggregate(rows) })).sort((a, b) => b.agg.checkin - a.agg.checkin || b.agg.fill - a.agg.fill);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -125,62 +132,33 @@ export function ClassModal({ session, all, onClose }: { session: Session; all: S
           {tab === "History" && (
             <div className="space-y-2">
               <p className="text-sm text-mist">
-                Every historic {session.name} class \u2014 any trainer, any location, any date (Hosted / Foundations / SWEAT excluded).
+                Matches for Class + Day + Time + Location. Trainer-specific rows are shown separately when Trainer also matches.
               </p>
-              <div className="overflow-x-auto rounded-2xl ring-1 ring-line">
-                <table className="w-full text-left text-[11px]">
-                  <thead>
-                    <tr className="bg-ink uppercase text-mist">
-                      <th className="px-2 py-2">Date</th>
-                      <th>Day</th>
-                      <th>Time</th>
-                      <th>Location</th>
-                      <th>Trainer</th>
-                      <th>In</th>
-                      <th>Cancelled</th>
-                      <th>Booked</th>
-                      <th>Cap</th>
-                      <th>Fill</th>
-                      <th>Revenue</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {classGroupRows.slice(0, 80).map((r, i) => (
-                      <tr key={i} className="border-t border-line">
-                        <td className="px-2 py-1.5">{r.date}</td>
-                        <td>{r.day}</td>
-                        <td>{r.time}</td>
-                        <td>{r.location}</td>
-                        <td>{r.trainer}</td>
-                        <td>{r.checkedIn}</td>
-                        <td>{r.lateCancelled}</td>
-                        <td>{r.booked}</td>
-                        <td>{r.capacity}</td>
-                        <td>{r.capacity ? Math.round((r.checkedIn / r.capacity) * 100) : 0}%</td>
-                        <td>\u20b9{Math.round(r.revenue).toLocaleString("en-IN")}</td>
-                      </tr>
-                    ))}
-                    {!classGroupRows.length && (
-                      <tr>
-                        <td colSpan={11} className="px-2 py-3 text-mist">
-                          No source-sheet rows for {session.name} yet. Connect Google Sheets in Settings or wait for the snapshot to load.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <Stat k="This Trainer Avg" v={exactCombo.sessions ? exactCombo.checkin.toFixed(1) : "—"} />
+                <Stat k="This Trainer Fill" v={exactCombo.sessions ? `${exactCombo.fill}%` : "—"} />
+                <Stat k="This Trainer Runs" v={String(exactCombo.sessions)} />
+                <Stat k="Slot Format Runs" v={String(exactSlotFormat.sessions)} />
+                <Stat k="Slot Avg" v={exactSlotFormat.sessions ? exactSlotFormat.checkin.toFixed(1) : "—"} />
+                <Stat k="Slot Fill" v={exactSlotFormat.sessions ? `${exactSlotFormat.fill}%` : "—"} />
+                <Stat k="Slot Booked" v={exactSlotFormat.sessions ? exactSlotFormat.booked.toFixed(1) : "—"} />
+                <Stat k="Slot Revenue" v={exactSlotFormat.sessions ? `₹${Math.round(exactSlotFormat.revenue).toLocaleString("en-IN")}` : "—"} />
               </div>
-              <p className="pt-2 text-[10px] uppercase text-mist">Top 3 trainers for {session.name} (by avg check-in, then fill)</p>
-              {topTrainers.map((t, i) => (
-                <div key={t.trainer} className="flex items-center justify-between rounded-2xl bg-ink px-3 py-2 text-sm">
-                  <span>
-                    {i + 1}. {t.trainer}
-                  </span>
-                  <span className="text-mist">
-                    {t.agg.checkin} avg \u00b7 {t.agg.fill}% fill \u00b7 {t.agg.sessions} sessions
-                  </span>
+              {!!slotByTrainer.length && (
+                <div className="space-y-1">
+                  <p className="pt-2 text-[10px] uppercase text-mist">All trainers in this exact slot</p>
+                  {slotByTrainer.map((row) => (
+                    <div key={row.name} className="flex items-center justify-between rounded-2xl bg-ink px-3 py-2 text-sm">
+                      <span>{row.name}</span>
+                      <span className="text-mist">{row.agg.checkin} avg · {row.agg.fill}% fill · {row.agg.sessions} sessions</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
+              <p className="pt-2 text-[10px] uppercase text-mist">Class + Day + Time + Location Rows</p>
+              <RawRowsTable rows={slotFormatRows} headers={rawHeaders} empty="No rows found for this class/day/time/location combination after normalization." />
+              <p className="pt-2 text-[10px] uppercase text-mist">Trainer + Class + Day + Time + Location Rows</p>
+              <RawRowsTable rows={trainerSlotRows} headers={rawHeaders} empty="No trainer-specific rows found for this exact class slot." />
               <p className="text-sm text-mist">Same class this generated week:</p>
               {sameClass.map((s) => (
                 <div key={s.id} className="flex justify-between rounded-2xl bg-ink px-3 py-2 text-sm">
@@ -248,13 +226,51 @@ export function ClassModal({ session, all, onClose }: { session: Session; all: S
           )}
 
           {tab === "Rules" && (
-            <ul className="space-y-2 text-sm text-mist">
-              <li>Certified for {format?.cert}. Uncertified trainers are blocked.</li>
-              <li>Daily cap 4h / weekly cap 15h. Current week {hours}h.</li>
-              <li>AM/PM split and one-location-per-shift are hard unless disabled in Settings.</li>
-              <li>Foundations, Hosted, and SWEAT In 30 cannot be generated.</li>
-              <li>{session.pinned ? "This slot is pinned and bypasses quality gates." : "Not pinned — quality floors apply."}</li>
-            </ul>
+            <div className="space-y-3">
+              <Panel className="overflow-hidden p-0">
+                <div className="border-b border-line bg-white px-4 py-3">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-mist">Scheduling Controls</p>
+                  <p className="mt-1 text-sm text-ink/75">Rules applied to this class assignment.</p>
+                </div>
+                <div className="grid gap-2 p-3 sm:grid-cols-2">
+                  <RuleCard
+                    icon={<Award className="h-4 w-4" />}
+                    label="Certification"
+                    value={`Requires ${format?.cert ?? "format"} certification`}
+                    detail="Uncertified instructors are blocked before scoring."
+                    tone="blue"
+                  />
+                  <RuleCard
+                    icon={<Clock3 className="h-4 w-4" />}
+                    label="Workload"
+                    value={`${hours}h scheduled this week`}
+                    detail="Daily cap is 4h and weekly cap is 15h."
+                    tone={hours >= 14 ? "amber" : "green"}
+                  />
+                  <RuleCard
+                    icon={<ShieldCheck className="h-4 w-4" />}
+                    label="Shift Policy"
+                    value="AM/PM and location rules active"
+                    detail="Split targets and one-location-per-shift constraints are enforced when enabled."
+                    tone="slate"
+                  />
+                  <RuleCard
+                    icon={<Ban className="h-4 w-4" />}
+                    label="Blocked Formats"
+                    value="Hosted, Foundations, SWEAT"
+                    detail="These formats are excluded from generated schedules."
+                    tone="rose"
+                  />
+                </div>
+              </Panel>
+              <RuleCard
+                icon={<Pin className="h-4 w-4" />}
+                label="Quality Gate"
+                value={session.pinned ? "Pinned slot" : "Standard quality gate"}
+                detail={session.pinned ? "Pinned classes can bypass quality thresholds." : "Attendance, fill, and evidence thresholds apply."}
+                tone={session.pinned ? "amber" : "green"}
+              />
+            </div>
           )}
         </div>
       </aside>
@@ -267,6 +283,61 @@ function Stat({ k, v }: { k: string; v: string }) {
     <div className="rounded-2xl bg-ink px-3 py-3">
       <p className="text-[10px] uppercase text-mist">{k}</p>
       <p className="text-lg font-medium">{v}</p>
+    </div>
+  );
+}
+
+function RawRowsTable({ rows, headers, empty }: { rows: PerfRow[]; headers: string[]; empty: string }) {
+  const cols = headers.length ? headers : Object.keys(rows[0]?.raw || {});
+  return (
+    <div className="max-h-[440px] overflow-auto rounded-2xl ring-1 ring-line">
+      <table className="w-full text-left text-[11px]">
+        <thead className="sticky top-0">
+          <tr className="bg-ink uppercase text-mist">
+            {cols.map((h) => (
+              <th key={h} className="whitespace-nowrap px-2 py-2">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} className="border-t border-line">
+              {cols.map((h) => (
+                <td key={h} className="max-w-[220px] truncate whitespace-nowrap px-2 py-1.5" title={r.raw[h] || ""}>
+                  {r.raw[h] || "—"}
+                </td>
+              ))}
+            </tr>
+          ))}
+          {!rows.length && (
+            <tr>
+              <td colSpan={Math.max(cols.length, 1)} className="px-2 py-3 text-mist">{empty}</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RuleCard({ icon, label, value, detail, tone }: { icon: ReactNode; label: string; value: string; detail: string; tone: "blue" | "green" | "amber" | "rose" | "slate" }) {
+  const tones = {
+    blue: "bg-[#005eed]/10 text-[#005eed] ring-[#005eed]/20",
+    green: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+    amber: "bg-amber-50 text-amber-700 ring-amber-100",
+    rose: "bg-rose-50 text-rose-700 ring-rose-100",
+    slate: "bg-slate-100 text-slate-700 ring-slate-200",
+  };
+  return (
+    <div className="rounded-2xl bg-white p-3 ring-1 ring-line">
+      <div className="flex items-start gap-3">
+        <span className={`mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ring-1 ${tones[tone]}`}>{icon}</span>
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase tracking-[0.16em] text-mist">{label}</p>
+          <p className="mt-1 text-sm font-medium text-[#0e1729]">{value}</p>
+          <p className="mt-1 text-xs leading-relaxed text-mist">{detail}</p>
+        </div>
+      </div>
     </div>
   );
 }

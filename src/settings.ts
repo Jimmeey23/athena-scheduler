@@ -71,7 +71,7 @@ export const DEFAULT_SETTINGS: Settings = {
       "Cardio Barre": { min: 9, max: 12 },
       "Mat 57": { min: 8, max: 11 },
       PowerCycle: { min: 15, max: 17 },
-      "Strength Lab": { min: 3, max: 6 },
+      "Strength Lab": { min: 8, max: 12 },
       FIT: { min: 12, max: 15 },
       "Amped Up!": { min: 1, max: 2 },
       HIIT: { min: 1, max: 2 },

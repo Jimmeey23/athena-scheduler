@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import { DAYS, LOCATIONS, TIMES, TRAINERS } from "./data";
 import { historicFor, scoreCombo } from "./engine";
@@ -56,6 +56,14 @@ export function CreateClassModal({
   }, [roster, loc, d, t, format, settings, all]);
 
   const picked = trainerOptions.find((o) => o.trainer.id === trainerId) ?? trainerOptions[0];
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
