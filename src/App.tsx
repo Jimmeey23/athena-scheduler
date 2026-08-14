@@ -25,6 +25,7 @@ import {
   TRAINERS,
   applySchedule,
   kpisFor,
+  levelOf,
   locationById,
   tickerItems,
   trainerById,
@@ -32,17 +33,19 @@ import {
 } from "./data";
 import type { Session, Settings, ViewId } from "./types";
 import { topTrainersFor } from "./ui";
-import { generateSchedule, historicFor, scoreCombo, slotHistory } from "./engine";
+import { generateSchedule, hasConflict, historicFor, scoreCombo, slotHistory } from "./engine";
 import { FORMATS } from "./data";
 import { loadSettings, saveSettings } from "./settings";
 import { loadCurrentSchedule, loadDrafts, pushDraft, saveCurrentSchedule } from "./drafts";
 import { ENV } from "./env";
 import { SettingsView } from "./SettingsView";
 import { ClassModal } from "./ClassModal";
+import { CreateClassModal } from "./CreateClassModal";
 import { Chatbot } from "./Chatbot";
 import { loadSnapshotCsv, setPerformanceRows } from "./performance";
-import { persistCloud, persistSchedule, loadSchedule } from "./supabase";
-import { recordOverride } from "./overrides";import {
+import { loadCloud, persistCloud, persistSchedule, loadSchedule, finalizeSchedule } from "./supabase";
+import { recordOverride } from "./overrides";
+import { exportCSV, exportHTML, exportJSON, exportPDF, exportPNG } from "./export";import {
   AnalyticsView,
   CityView,
   ControlView,
@@ -78,11 +81,28 @@ const AI_STEPS = [
   "Drafting Kwality House against weekly floor and mix bands…",
   "Drafting Supreme HQ with PowerCycle priority trainers…",
   "Drafting Kenkere / Courtside / Copper without banned formats…",
-  "Scoring trials — attendance 55, fill 30, proven history 12…",
+  "Running 5 independent trials and scoring attendance, fill, and trend…",
   "Rejecting one-off combos that outrank scheduled history…",
   "Checking AM/PM split, 4h/day, 15h/week, one house per shift…",
+  "Applying learned corrections from your past manual swaps…",
+  "Hill-climbing: reassigning the weakest-scoring slots to stronger trainers…",
   "Keeping the highest-accuracy unique draft…",
 ];
+
+function mondayOf(d: Date) {
+  const n = new Date(d);
+  const day = n.getDay();
+  const diff = (day + 6) % 7; // days since Monday
+  n.setDate(n.getDate() - diff);
+  n.setHours(0, 0, 0, 0);
+  return n;
+}
+function isoDate(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+function fmtShort(d: Date) {
+  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+}
 
 export default function App() {
   const [locationId, setLocationId] = useState("kwality");
@@ -93,6 +113,9 @@ export default function App() {
   const [pinned, setPinned] = useState<string[]>([]);
   const [reassigned, setReassigned] = useState<Record<string, string>>({});
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
+  const [weekStart, setWeekStart] = useState<Date>(() => mondayOf(new Date()));
+  const [weekPickerOpen, setWeekPickerOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [bundle, setBundle] = useState(() => {
     const saved = loadCurrentSchedule();
     if (saved) return saved;
@@ -134,6 +157,15 @@ export default function App() {
       .catch(() => {
         /* keep the local schedule */
       });
+    // Restores settings and the draft history from the shared Supabase state, if present.
+    loadCloud()
+      .then((cloud) => {
+        if (cloud?.settings) setSettings(cloud.settings as Settings);
+        if (cloud?.drafts?.length) setDrafts(cloud.drafts);
+      })
+      .catch(() => {
+        /* keep local settings/drafts */
+      });
   }, []);
 
   useEffect(() => {
@@ -146,6 +178,10 @@ export default function App() {
         setDayModal(null);
         setTimeModal(null);
         setSimilarFor(null);
+        setCreateFor(null);
+        setExportOpen(false);
+        setWeekPickerOpen(false);
+        setRailOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -203,7 +239,7 @@ export default function App() {
           setTimeout(() => setToast(null), 2400);
         }, 400);
       }
-    }, 8000);
+    }, 10000);
   }
 
   function onSelect(s: Session) {
@@ -216,6 +252,7 @@ export default function App() {
   const [timeModal, setTimeModal] = useState<string | null>(null);
   const [similarFor, setSimilarFor] = useState<Session | null>(null);
   const [drafts, setDrafts] = useState(() => loadDrafts());
+  const [createFor, setCreateFor] = useState<{ locationId: string; day: number; time: string } | null>(null);
 
   function setSessions(next: Session[]) {
     setBundle((b) => {
@@ -271,6 +308,54 @@ export default function App() {
         accent: format.accent,
       },
     ]);
+  }
+
+  function createClass(opts: { locationId: string; day: number; time: string; format: (typeof FORMATS)[number]; trainer: (typeof TRAINERS)[number]; recurring: boolean }) {
+    const { locationId: loc, day, time, format, trainer, recurring } = opts;
+    const conflict = hasConflict(bundle.sessions, { id: "new", locationId: loc, day, time, trainerId: trainer.id, studio: format.studio, duration: format.duration });
+    if (conflict) {
+      setToast(conflict);
+      setTimeout(() => setToast(null), 2600);
+      return;
+    }
+    const h = historicFor(loc, day, time, format.name, trainer.id);
+    const sc = scoreCombo(h, trainer, settings, format.name);
+    const session: Session = {
+      id: `${loc}-${day}-${time}-${format.name.replace(/\s+/g, "-").toLowerCase()}-${trainer.id}-${Date.now()}`,
+      locationId: loc,
+      day,
+      time,
+      name: format.name,
+      studio: format.studio,
+      duration: format.duration,
+      trainerId: trainer.id,
+      score: sc.score,
+      fill: h.fill,
+      avg: h.checkin,
+      sessions: h.sessions,
+      oneOff: sc.oneOff,
+      reason: recurring
+        ? `Manually created and pinned \u2014 protected from future regenerations.`
+        : `Manually created for this week only.`,
+      breakdown: sc.breakdown,
+      capacity: 18,
+      tags: recurring ? ["protected", "new"] : ["new"],
+      accent: format.accent,
+      pinned: recurring,
+    };
+    setSessions([...bundle.sessions, session]);
+    if (recurring) {
+      persistSettings({
+        ...settings,
+        pins: [
+          ...settings.pins,
+          { id: `pin-${Date.now()}`, locationId: loc, day, time, className: format.name, trainerId: trainer.id, note: "Manually created", enabled: true },
+        ],
+      });
+    }
+    setCreateFor(null);
+    setToast(`Added ${format.name} \u2014 ${trainer.name}`);
+    setTimeout(() => setToast(null), 2200);
   }
 
   return (
@@ -339,17 +424,73 @@ export default function App() {
                 <span className="live-dot h-1.5 w-1.5 rounded-full bg-gold" />
                 Working solo
               </span>
-              <span className="hidden items-center gap-1.5 rounded-full bg-white px-3 py-1.5 ring-1 ring-line md:inline-flex">
-                <Sun className="h-3.5 w-3.5 text-gold" />
-                Week of 10–16 Aug
-              </span>
+              <div className="relative">
+                <button
+                  onClick={() => setWeekPickerOpen((o) => !o)}
+                  className="hidden items-center gap-1.5 rounded-full bg-white px-3 py-1.5 ring-1 ring-line hover:ring-[#005eed]/40 md:inline-flex"
+                >
+                  <Sun className="h-3.5 w-3.5 text-gold" />
+                  Week of {fmtShort(weekStart)} – {fmtShort(new Date(weekStart.getTime() + 6 * 86400000))}
+                </button>
+                {weekPickerOpen && (
+                  <div className="absolute right-0 top-full z-40 mt-2 rounded-2xl border border-line bg-white p-3 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                    <p className="mb-2 text-[10px] uppercase tracking-wider text-mist">Pick any date in the week</p>
+                    <input
+                      type="date"
+                      value={isoDate(weekStart)}
+                      onChange={(e) => {
+                        if (!e.target.value) return;
+                        setWeekStart(mondayOf(new Date(e.target.value)));
+                        setWeekPickerOpen(false);
+                      }}
+                      className="rounded-xl border border-line px-3 py-2 text-sm"
+                    />
+                  </div>
+                )}
+              </div>
               <span className="hidden items-center gap-1.5 rounded-full bg-white px-3 py-1.5 ring-1 ring-line xl:inline-flex">
                 <CalendarDays className="h-3.5 w-3.5" />
-                10 / 08 / 2026
+                {isoDate(weekStart)}
               </span>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button className="rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory">Finalize PDF</button>
+              <div className="relative">
+                <button onClick={() => setExportOpen((o) => !o)} className="rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory">
+                  Export
+                </button>
+                {exportOpen && (
+                  <div className="absolute right-0 top-full z-40 mt-2 w-40 space-y-1 rounded-2xl border border-line bg-white p-2 text-xs shadow-2xl">
+                    {([
+                      ["CSV", () => exportCSV(sessions)],
+                      ["JSON", () => exportJSON(sessions, bundle.report)],
+                      ["HTML", () => exportHTML(sessions)],
+                      ["PDF", () => exportPDF(sessions)],
+                      ["PNG", () => exportPNG(sessions, location.name)],
+                    ] as const).map(([label, fn]) => (
+                      <button
+                        key={label}
+                        onClick={() => {
+                          fn();
+                          setExportOpen(false);
+                        }}
+                        className="block w-full rounded-lg px-2 py-1.5 text-left hover:bg-ink"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={async () => {
+                  const ok = await finalizeSchedule(isoDate(weekStart), bundle);
+                  setToast(ok ? `Finalized schedule saved for week of ${fmtShort(weekStart)}` : "Could not save to Supabase — check connection");
+                  setTimeout(() => setToast(null), 2600);
+                }}
+                className="rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory"
+              >
+                Finalize schedule
+              </button>
               <button
                 onClick={() => runAi("generate")}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[#0e1729] px-3 py-2 text-xs font-semibold text-white"
@@ -481,15 +622,26 @@ export default function App() {
                   }
                   addFromHistoric(opt);
                 }}
-                onDropSession={(id, day, time) => setSessions(bundle.sessions.map((s) => (s.id === id ? { ...s, day, time, reason: `Moved to ${DAYS[day].label} ${time}` } : s)))}
+                onDropSession={(id, day, time) => {
+                  const moving = bundle.sessions.find((s) => s.id === id);
+                  if (!moving) return;
+                  const conflict = hasConflict(bundle.sessions, { ...moving, day, time }, id);
+                  if (conflict) {
+                    setToast(conflict);
+                    setTimeout(() => setToast(null), 2600);
+                    return;
+                  }
+                  setSessions(bundle.sessions.map((s) => (s.id === id ? { ...s, day, time, reason: `Moved to ${DAYS[day].label} ${time}` } : s)));
+                }}
                 onDayClick={setDayModal}
                 onTimeClick={setTimeModal}
+                onOpenCreate={(day, time) => setCreateFor({ locationId, day, time })}
               />
             )}
             {view === "timeline" && <TimelineView sessions={sessions} onSelect={onSelect} />}
             {view === "list" && <ListView sessions={sessions} pinned={pinned} onSelect={onSelect} />}
-            {view === "trainer" && <TrainerView sessions={sessions} onSelect={onSelect} />}
-            {view === "multi" && <MultiView all={all} actions={actions} />}
+            {view === "trainer" && <TrainerView sessions={all} onSelect={onSelect} />}
+            {view === "multi" && <MultiView all={all} actions={actions} onOpenCreate={(loc, day, time) => setCreateFor({ locationId: loc, day, time })} />}
             {view === "city" && <CityView all={all} actions={actions} onJump={(id) => { setLocationId(id); setView("grid"); }} />}
             {view === "heatmap" && <HeatmapView sessions={sessions} />}
             {view === "rooms" && <RoomsView sessions={sessions} all={all} actions={actions} />}
@@ -511,11 +663,28 @@ export default function App() {
 
       {kpiKey && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setKpiKey(null)}>
-          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-3xl rounded-3xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <p className="text-[10px] uppercase text-mist">Metric drill-down</p>
             <h3 className="font-serif text-3xl">{kpis.find((k) => k.key === kpiKey)?.label}</h3>
             <p className="mt-1 font-serif text-5xl text-[#005eed]">{kpis.find((k) => k.key === kpiKey)?.value}</p>
             <p className="mt-2 text-sm text-mist">{kpis.find((k) => k.key === kpiKey)?.hint}</p>
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {[
+                ["Classes", sessions.length],
+                ["Avg fill", `${Math.round(sessions.reduce((a, s) => a + s.fill, 0) / (sessions.length || 1))}%`],
+                ["Avg score", Math.round(sessions.reduce((a, s) => a + s.score, 0) / (sessions.length || 1))],
+                ["Avg check-in", (sessions.reduce((a, s) => a + s.avg, 0) / (sessions.length || 1)).toFixed(1)],
+                ["Trainers used", new Set(sessions.map((s) => s.trainerId)).size],
+                ["One-off", sessions.filter((s) => s.oneOff).length],
+                ["Low fill", sessions.filter((s) => s.tags.includes("low")).length],
+                ["Pinned", sessions.filter((s) => s.pinned).length],
+              ].map(([label, value]) => (
+                <div key={String(label)} className="rounded-2xl bg-ink p-2.5 text-center">
+                  <p className="font-serif text-xl">{value}</p>
+                  <p className="text-[10px] uppercase tracking-wider text-mist">{label}</p>
+                </div>
+              ))}
+            </div>
             <div className="mt-4 max-h-[50vh] overflow-auto">
               <table className="w-full text-left text-xs">
                 <thead>
@@ -523,6 +692,8 @@ export default function App() {
                     <th className="py-2">Day</th>
                     <th>Time</th>
                     <th>Class</th>
+                    <th>Studio</th>
+                    <th>Duration</th>
                     <th>Trainer</th>
                     <th>Fill</th>
                     <th>Avg</th>
@@ -536,6 +707,8 @@ export default function App() {
                       <td className="py-1.5">{DAYS[s.day].label}</td>
                       <td>{s.time}</td>
                       <td>{s.name}</td>
+                      <td>{s.studio}</td>
+                      <td>{s.duration}m</td>
                       <td>{trainerById(s.trainerId).name}</td>
                       <td>{s.fill}%</td>
                       <td>{s.avg}</td>
@@ -554,6 +727,18 @@ export default function App() {
       )}
 
       {selected && <ClassModal session={selected} all={all} onClose={() => setSelectedId(null)} />}
+
+      {createFor && (
+        <CreateClassModal
+          all={bundle.sessions}
+          settings={settings}
+          locationId={createFor.locationId}
+          day={createFor.day}
+          time={createFor.time}
+          onClose={() => setCreateFor(null)}
+          onCreate={createClass}
+        />
+      )}
 
       {swapFor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setSwapFor(null)}>
@@ -595,14 +780,37 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setDayModal(null)}>
           <div className="max-h-[80vh] w-full max-w-2xl overflow-auto rounded-3xl bg-white p-5" onClick={(e) => e.stopPropagation()}>
             <h3 className="font-serif text-2xl">{DAYS[dayModal].full} at {location.name}</h3>
+            {(() => {
+              const day = sessions.filter((s) => s.day === dayModal);
+              const shifts: Array<"am" | "pm"> = ["am", "pm"];
+              const levels: Array<"Beginner" | "Intermediate" | "Advanced"> = ["Beginner", "Intermediate", "Advanced"];
+              return (
+                <div className="my-4 grid grid-cols-2 gap-3">
+                  {shifts.map((sh) => (
+                    <div key={sh} className="rounded-2xl bg-ink p-3">
+                      <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-mist">{sh === "am" ? "Morning" : "Evening"}</p>
+                      {levels.map((lvl) => {
+                        const count = day.filter((s) => (s.time < "13:00" ? "am" : "pm") === sh && levelOf(s.name) === lvl).length;
+                        return (
+                          <div key={lvl} className="mb-1 flex items-center justify-between text-xs">
+                            <span className="text-mist">{lvl}</span>
+                            <span className="font-medium">{count}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
             <table className="mt-3 w-full text-left text-xs">
               <thead>
-                <tr className="uppercase text-mist"><th className="py-2">Time</th><th>Class</th><th>Trainer</th><th>Fill</th></tr>
+                <tr className="uppercase text-mist"><th className="py-2">Time</th><th>Class</th><th>Level</th><th>Trainer</th><th>Fill</th></tr>
               </thead>
               <tbody>
                 {sessions.filter((s) => s.day === dayModal).sort((a,b)=>a.time.localeCompare(b.time)).map((s) => (
                   <tr key={s.id} className="border-t border-line">
-                    <td className="py-1.5">{s.time}</td><td>{s.name}</td><td>{trainerById(s.trainerId).name}</td><td>{s.fill}%</td>
+                    <td className="py-1.5">{s.time}</td><td>{s.name}</td><td>{levelOf(s.name)}</td><td>{trainerById(s.trainerId).name}</td><td>{s.fill}%</td>
                   </tr>
                 ))}
               </tbody>

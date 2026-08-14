@@ -64,3 +64,31 @@ export async function loadSchedule(): Promise<CloudSchedule | null> {
     return null;
   }
 }
+
+// Finalized snapshots are keyed by ISO week-start date so each week's sign-off is preserved
+// independently of the always-mutable "current draft" row above.
+export async function finalizeSchedule(weekStart: string, bundle: CloudSchedule) {
+  if (!client) return false;
+  try {
+    const { error } = await client.from("athena_finalized_schedules").upsert({
+      week_start: weekStart,
+      sessions: bundle.sessions,
+      report: bundle.report,
+      finalized_at: new Date().toISOString(),
+    });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+export async function loadFinalizedSchedule(weekStart: string): Promise<CloudSchedule | null> {
+  if (!client) return null;
+  try {
+    const { data } = await client.from("athena_finalized_schedules").select("sessions, report").eq("week_start", weekStart).maybeSingle();
+    if (!data?.sessions || !data?.report) return null;
+    return { sessions: data.sessions as Session[], report: data.report as GenReport };
+  } catch {
+    return null;
+  }
+}

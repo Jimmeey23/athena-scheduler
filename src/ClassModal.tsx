@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { DAYS, FORMATS, locationById, trainerById, trainerLoad } from "./data";
 import { historicFor, slotHistory } from "./engine";
+import { getPerformanceRows, topTrainersForClass } from "./performance";
 import type { Session } from "./types";
 import { FillBar, Panel, ScoreRing, TagChip, trainerWeekHours } from "./ui";
 
@@ -19,7 +20,11 @@ export function ClassModal({ session, all, onClose }: { session: Session; all: S
   const hist = slotHistory(session.locationId, session.day, session.time);
   const sameClass = all.filter((s) => s.name === session.name);
   const loadByHouse = locHours(all, trainer.id);
-  const sheetRows = historicFor(session.locationId, session.day, session.time, session.name, session.trainerId).rows || [];
+  // Every historic instance of this exact class format, across all trainers/locations/dates — not just this slot.
+  const classGroupRows = getPerformanceRows()
+    .filter((r) => r.className.toLowerCase() === session.name.toLowerCase())
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const topTrainers = topTrainersForClass(session.name, 3);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -119,7 +124,9 @@ export function ClassModal({ session, all, onClose }: { session: Session; all: S
 
           {tab === "History" && (
             <div className="space-y-2">
-              <p className="text-sm text-mist">Source spreadsheet rows for this trainer × class (Hosted / Foundations / SWEAT excluded).</p>
+              <p className="text-sm text-mist">
+                Every historic {session.name} class \u2014 any trainer, any location, any date (Hosted / Foundations / SWEAT excluded).
+              </p>
               <div className="overflow-x-auto rounded-2xl ring-1 ring-line">
                 <table className="w-full text-left text-[11px]">
                   <thead>
@@ -127,7 +134,10 @@ export function ClassModal({ session, all, onClose }: { session: Session; all: S
                       <th className="px-2 py-2">Date</th>
                       <th>Day</th>
                       <th>Time</th>
+                      <th>Location</th>
+                      <th>Trainer</th>
                       <th>In</th>
+                      <th>Cancelled</th>
                       <th>Booked</th>
                       <th>Cap</th>
                       <th>Fill</th>
@@ -135,28 +145,42 @@ export function ClassModal({ session, all, onClose }: { session: Session; all: S
                     </tr>
                   </thead>
                   <tbody>
-                    {sheetRows.slice(0, 40).map((r, i) => (
+                    {classGroupRows.slice(0, 80).map((r, i) => (
                       <tr key={i} className="border-t border-line">
                         <td className="px-2 py-1.5">{r.date}</td>
                         <td>{r.day}</td>
                         <td>{r.time}</td>
+                        <td>{r.location}</td>
+                        <td>{r.trainer}</td>
                         <td>{r.checkedIn}</td>
+                        <td>{r.lateCancelled}</td>
                         <td>{r.booked}</td>
                         <td>{r.capacity}</td>
                         <td>{r.capacity ? Math.round((r.checkedIn / r.capacity) * 100) : 0}%</td>
-                        <td>₹{Math.round(r.revenue).toLocaleString("en-IN")}</td>
+                        <td>\u20b9{Math.round(r.revenue).toLocaleString("en-IN")}</td>
                       </tr>
                     ))}
-                    {!sheetRows.length && (
+                    {!classGroupRows.length && (
                       <tr>
-                        <td colSpan={8} className="px-2 py-3 text-mist">
-                          No source-sheet rows for this combo yet. Connect Google Sheets in Settings or wait for the Sessions snapshot to load.
+                        <td colSpan={11} className="px-2 py-3 text-mist">
+                          No source-sheet rows for {session.name} yet. Connect Google Sheets in Settings or wait for the snapshot to load.
                         </td>
                       </tr>
                     )}
                   </tbody>
                 </table>
               </div>
+              <p className="pt-2 text-[10px] uppercase text-mist">Top 3 trainers for {session.name} (by avg check-in, then fill)</p>
+              {topTrainers.map((t, i) => (
+                <div key={t.trainer} className="flex items-center justify-between rounded-2xl bg-ink px-3 py-2 text-sm">
+                  <span>
+                    {i + 1}. {t.trainer}
+                  </span>
+                  <span className="text-mist">
+                    {t.agg.checkin} avg \u00b7 {t.agg.fill}% fill \u00b7 {t.agg.sessions} sessions
+                  </span>
+                </div>
+              ))}
               <p className="text-sm text-mist">Same class this generated week:</p>
               {sameClass.map((s) => (
                 <div key={s.id} className="flex justify-between rounded-2xl bg-ink px-3 py-2 text-sm">

@@ -69,7 +69,7 @@ export function historicFor(locationId: string, day: number, time: string, forma
   const any = lookupAgg(locationId, day, time, format, trainer?.name || trainerId);
   const sessions = any.sessions;
   const trend = sessions >= 8 ? 4 : sessions >= 4 ? 0 : -6;
-  return { checkin: any.checkin, fill: any.fill, trend, sessions, revenue: any.revenue, rows: any.rows };
+  return { checkin: any.checkin, fill: any.fill, trend, sessions, revenue: any.revenue, rows: any.rows, tier: any.tier };
 }
 
 // Memoizes historicFor for the duration of a single generateSchedule() run — the same
@@ -150,17 +150,29 @@ function formatAllowed(locationId: string, f: Format, settings?: Settings) {
   return true;
 }
 
-function roomFor(locationId: string, f: Format, taken: Set<string>, day: number, time: string, settings?: Settings) {
+function roomFor(locationId: string, f: Format, book: Book, day: number, time: string, settings?: Settings) {
   const list = settings ? houses(settings) : LOCATIONS;
   const house = list.find((l) => l.id === locationId);
   const rooms = house?.rooms ?? [];
+  const start = toMin(time);
+  const end = start + f.duration;
+  const free = (room: string) => !overlapsAny(book.roomIntervals[`${locationId}|${day}|${room}`], start, end);
   if (f.family === "cycle" || f.family === "strength") {
     const dedicated = house?.roomTypes?.[f.family];
-    if (dedicated && rooms.includes(dedicated) && !taken.has(`${day}|${time}|${dedicated}`)) return dedicated;
+    // PowerCycle/Strength rooms are single-purpose — never handed out to any other format.
+    if (dedicated && rooms.includes(dedicated) && free(dedicated)) return dedicated;
+    return null;
   }
-  if (rooms.includes(f.studio) && !taken.has(`${day}|${time}|${f.studio}`)) return f.studio;
-  const fallback = rooms.filter((r) => r !== house?.roomTypes?.strength);
-  return fallback.find((r) => !taken.has(`${day}|${time}|${r}`)) ?? null;
+  if (rooms.includes(f.studio) && free(f.studio)) return f.studio;
+  const fallback = rooms.filter((r) => r !== house?.roomTypes?.strength && r !== house?.roomTypes?.cycle);
+  return fallback.find((r) => free(r)) ?? null;
+}
+
+type Interval = { start: number; end: number };
+
+function overlapsAny(intervals: Interval[] | undefined, start: number, end: number) {
+  if (!intervals) return false;
+  return intervals.some((iv) => start < iv.end && end > iv.start);
 }
 
 type Book = {
@@ -174,6 +186,8 @@ type Book = {
   timeline: Record<string, Array<{ time: string; format: string }>>;
   rooms: Set<string>;
   busy: Set<string>;
+  trainerIntervals: Record<string, Interval[]>;
+  roomIntervals: Record<string, Interval[]>;
   shiftTrainers: Record<string, string[]>;
 };
 
@@ -189,6 +203,8 @@ function emptyBook(): Book {
     timeline: {},
     rooms: new Set(),
     busy: new Set(),
+    trainerIntervals: {},
+    roomIntervals: {},
     shiftTrainers: {},
   };
 }
@@ -220,7 +236,8 @@ function canUseTrainer(
   const limits = limitsOf(settings);
   if ((book.hours[dayKey] ?? 0) + duration / 60 > limits.dailyHourCap) return "day-hour-cap";
   if ((book.weekHours[t.id] ?? 0) + duration / 60 > limits.weeklyCap) return "week-cap";
-  if (book.busy.has(`${t.id}|${day}|${time}`)) return "overlap";
+  // A trainer can't be in two classes whose time windows overlap, even if they don't share a start time.
+  if (overlapsAny(book.trainerIntervals[dayKey], tm, tm + duration)) return "overlap";
   const sh = shiftOf(time);
   const used = book.shift[dayKey];
   if (settings.ai.enforceAmPm !== false && used && used !== sh) return "am-pm-split";
@@ -239,6 +256,8 @@ function canUseTrainer(
 function commit(book: Book, t: Trainer, locationId: string, day: number, time: string, duration: number, format: string, room: string) {
   const dayKey = `${t.id}|${day}`;
   const sh = shiftOf(time);
+  const start = toMin(time);
+  const end = start + duration;
   book.hours[dayKey] = (book.hours[dayKey] ?? 0) + duration / 60;
   book.weekHours[t.id] = (book.weekHours[t.id] ?? 0) + duration / 60;
   book.dayCount[dayKey] = (book.dayCount[dayKey] ?? 0) + 1;
@@ -252,21 +271,36 @@ function commit(book: Book, t: Trainer, locationId: string, day: number, time: s
   book.timeline[`${locationId}|${day}`] = [...tl, { time, format }];
   book.rooms.add(`${day}|${time}|${room}`);
   book.busy.add(`${t.id}|${day}|${time}`);
+  (book.trainerIntervals[dayKey] ??= []).push({ start, end });
+  const roomKey = `${locationId}|${day}|${room}`;
+  (book.roomIntervals[roomKey] ??= []).push({ start, end });
   const ck = `${locationId}|${day}|${sh}`;
   const st = book.shiftTrainers[ck] || [];
   if (!st.includes(t.id)) book.shiftTrainers[ck] = [...st, t.id];
 }
 
 function uncommit(book: Book, t: Trainer, locationId: string, day: number, time: string, duration: number, format: string, room: string) {
-  // Best-effort reversal of commit(): counts/sets fully unwind; shift/timeline history is left
-  // intact (shared bookkeeping, safe to be conservative) so re-checks never allow a double-booking.
+  // Best-effort reversal of commit(): counts/sets/intervals fully unwind; shift/timeline history is
+  // left intact (shared bookkeeping, safe to be conservative) so re-checks never allow a double-booking.
   const dayKey = `${t.id}|${day}`;
+  const start = toMin(time);
+  const end = start + duration;
   book.hours[dayKey] = Math.max(0, (book.hours[dayKey] ?? 0) - duration / 60);
   book.weekHours[t.id] = Math.max(0, (book.weekHours[t.id] ?? 0) - duration / 60);
   book.dayCount[dayKey] = Math.max(0, (book.dayCount[dayKey] ?? 0) - 1);
   book.formats[`${locationId}|${format}`] = Math.max(0, (book.formats[`${locationId}|${format}`] ?? 0) - 1);
   book.busy.delete(`${t.id}|${day}|${time}`);
   book.rooms.delete(`${day}|${time}|${room}`);
+  const trainerList = book.trainerIntervals[dayKey];
+  if (trainerList) {
+    const i = trainerList.findIndex((iv) => iv.start === start && iv.end === end);
+    if (i >= 0) trainerList.splice(i, 1);
+  }
+  const roomList = book.roomIntervals[`${locationId}|${day}|${room}`];
+  if (roomList) {
+    const i = roomList.findIndex((iv) => iv.start === start && iv.end === end);
+    if (i >= 0) roomList.splice(i, 1);
+  }
 }
 
 function mixOk(locationId: string, name: string, settings: Settings, book: Book, add = 1) {
@@ -311,9 +345,22 @@ function makeSession(
   if (trainer.tier === 1 && scored.score >= 78) tags.push("best");
   if (format.family === "barre") tags.push("mix");
   if (h.fill < settings.quality.fillFloor + 8) tags.push("low");
+  // Reason text must say exactly what evidence was used \u2014 never phrase a broad fallback aggregate as if it were slot-specific.
+  const tierText: Record<string, string> = {
+    exact: `at ${time} on ${DAYS[day].full}`,
+    "trainer-format": `for ${trainer.name} \u00d7 ${format.name} (no history at this exact time/day, using their other slots for this format)`,
+    "trainer-only": `for ${trainer.name} at this house (no history with ${format.name} specifically, using their overall record)`,
+    "format-only": `for ${format.name} citywide (no history for ${trainer.name} with this format at all)`,
+    none: `\u2014 no historic data found for this combination`,
+  };
   const reason = scored.oneOff
     ? "Held only as a last-resort cover — one-off history is ranked below proven combos."
-    : `Assigned because ${trainer.name} × ${format.name} at ${time} averages ${h.checkin} check-ins and ${h.fill}% fill across ${h.sessions} historic sessions. Attendance and fill outrank tier.`;
+    : `Assigned because ${trainer.name} \u00d7 ${format.name} ${tierText[h.tier] ?? tierText.exact} averages ${h.checkin} check-ins and ${h.fill}% fill across ${h.sessions} historic sessions. Attendance and fill outrank tier.`;
+  // Room capacity is set by the venue's actual room, not just the class family — historic
+  // attendance for the slot is capped against it so fill% reflects the true room ceiling.
+  const house = houses(settings).find((l) => l.id === locationId);
+  const roomCapacity = house?.roomCapacity?.[room];
+  const capacity = roomCapacity ?? (format.family === "cycle" ? 24 : format.family === "strength" ? 12 : 18);
   return {
     id: `${locationId}-${day}-${time}-${format.name.replace(/\s+/g, "-").toLowerCase()}-${trainer.id}`,
     locationId,
@@ -330,7 +377,7 @@ function makeSession(
     oneOff: scored.oneOff,
     reason,
     breakdown: scored.breakdown,
-    capacity: format.family === "cycle" ? 24 : format.family === "strength" ? 12 : 18,
+    capacity,
     tags,
     accent: format.accent,
   };
@@ -364,7 +411,7 @@ function pickCandidate(
       if (earlier?.format === format.name || later?.format === format.name) continue;
     }
     if (format.name === "Recovery" && !(book.timeline[`${locationId}|${day}`] || []).length) continue;
-    const room = roomFor(locationId, format, book.rooms, day, time, settings);
+    const room = roomFor(locationId, format, book, day, time, settings);
     if (!room) continue;
     for (const trainer of trainers) {
       if (canUseTrainer(trainer, locationId, day, time, format.duration, format, settings, book)) continue;
@@ -415,7 +462,7 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean) {
     const format = catalog(settings).find((f) => f.name === pin.className);
     const trainer = roster(settings).find((t) => t.id === pin.trainerId);
     if (!format || !trainer) continue;
-    const room = roomFor(pin.locationId, format, book.rooms, pin.day, pin.time);
+    const room = roomFor(pin.locationId, format, book, pin.day, pin.time);
     if (!room) continue;
     if (!allowedTime(pin.day, pin.time, settings)) continue;
     if (canUseTrainer(trainer, pin.locationId, pin.day, pin.time, format.duration, format, settings, book)) continue;
@@ -601,7 +648,7 @@ function refineSessions(sessions: Session[], book: Book, settings: Settings, ran
 }
 
 export function generateSchedule(settings: Settings, seed: number, optimize = false) {
-  const trials = optimize || settings.ai.useAiPass ? 3 : 2;
+  const trials = optimize || settings.ai.useAiPass ? 5 : 3;
   historicCache = new Map();
   try {
     let best: ReturnType<typeof generateOnce> | null = null;
@@ -632,4 +679,30 @@ export function generateSchedule(settings: Settings, seed: number, optimize = fa
 
 export function complianceFor(sessions: Session[], settings: Settings) {
   return evaluate(sessions, settings, 0, 1, 1);
+}
+
+// Guards manual edits (drag/drop, chatbot, paste, manual create) against the same double-booking
+// rules the generator itself enforces: one trainer per slot, one class per room per slot \u2014 accounting
+// for each class's actual duration, not just an exact matching start time.
+export function hasConflict(
+  sessions: Session[],
+  candidate: { id: string; locationId: string; day: number; time: string; trainerId: string; studio: string; duration?: number },
+  excludeId?: string
+): string | null {
+  const start = toMin(candidate.time);
+  const end = start + (candidate.duration ?? 60);
+  for (const s of sessions) {
+    if (s.id === (excludeId ?? candidate.id)) continue;
+    if (s.day !== candidate.day) continue;
+    const sStart = toMin(s.time);
+    const sEnd = sStart + s.duration;
+    if (start >= sEnd || end <= sStart) continue;
+    if (s.trainerId === candidate.trainerId) return `${trainerById_(s.trainerId)} is already teaching ${s.time}\u2013${DAYS[candidate.day].full} then, overlapping ${candidate.time}.`;
+    if (s.locationId === candidate.locationId && s.studio === candidate.studio) return `${candidate.studio} is already booked from ${s.time} on ${DAYS[candidate.day].full}, overlapping ${candidate.time}.`;
+  }
+  return null;
+}
+
+function trainerById_(id: string) {
+  return BASE_TRAINERS.find((t) => t.id === id)?.name || id;
 }

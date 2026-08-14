@@ -10,10 +10,13 @@ export type PerfRow = {
   time: string;
   capacity: number;
   checkedIn: number;
+  lateCancelled: number;
   booked: number;
   revenue: number;
   date: string;
 };
+
+export type MatchTier = "exact" | "trainer-format" | "trainer-only" | "format-only" | "none";
 
 export type PerfAgg = {
   sessions: number;
@@ -31,7 +34,7 @@ export const SNAPSHOT_CSV =
   "https://raw.githubusercontent.com/Jimmeey23/make-my-schedule/codex/dynamic-schedule-counts/Sessions%20Performance%20Data.csv";
 
 export function locIdFromName(name: string) {
-  return resolveLocationId(name) ?? "kwality";
+  return resolveLocationId(name);
 }
 
 export function cleanClass(name: string) {
@@ -49,42 +52,64 @@ function timeHHMM(raw: string) {
   return `${m[1].padStart(2, "0")}:${m[2]}`;
 }
 
+// A class that hasn't happened yet (future date, or later today) has no attendance evidence —
+// it must never be counted as historic data.
+function hasOccurred(dateStr: string, time: string): boolean {
+  if (!dateStr) return true;
+  const dt = new Date(`${dateStr}T${time || "00:00"}`);
+  if (Number.isNaN(dt.getTime())) return true;
+  return dt.getTime() <= Date.now();
+}
+
 export function parseCsv(text: string): PerfRow[] {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return [];
   const headers = splitCsv(lines[0]).map((h) => h.trim());
   const idx = (name: string) => headers.findIndex((h) => h.toLowerCase() === name.toLowerCase());
   const iTrainer = idx("Trainer");
+  // "Classes" (e.g. "Studio Barre 57") is the clean, format-matching column; "Class"/"SessionName" are fallbacks.
+  const iClasses = idx("Classes");
   const iClass = Math.max(idx("Class"), idx("SessionName"));
   const iLoc = idx("Location");
   const iDay = idx("Day");
   const iTime = idx("Time");
   const iCap = idx("Capacity");
   const iIn = idx("CheckedIn");
+  const iLate = idx("LateCancelled");
   const iBook = idx("Booked");
   const iRev = idx("Revenue");
   const iDate = idx("Date");
   const rows: PerfRow[] = [];
   for (let i = 1; i < lines.length; i++) {
     const c = splitCsv(lines[i]);
-    const className = cleanClass(c[iClass] || "");
-    if (!className || BANNED.test(className) || BANNED.test(c[iClass] || "")) continue;
+    const rawClass = (iClasses >= 0 && c[iClasses]) || c[iClass] || "";
+    const className = cleanClass(rawClass);
+    if (!className || BANNED.test(className) || BANNED.test(rawClass)) continue;
     const trainer = (c[iTrainer] || "").trim();
     if (!trainer) continue;
     const location = c[iLoc] || "";
+    // Rows from venues outside our 5 studios (e.g. partner/pop-up locations) don't belong to any house — skip them
+    // rather than silently attributing their history to Kwality.
+    const locationId = locIdFromName(location);
+    if (!locationId) continue;
+    const day = c[iDay] || "";
+    const time = timeHHMM(c[iTime] || "");
+    const date = c[iDate] || "";
+    if (!hasOccurred(date, time)) continue;
     rows.push({
       trainer,
       className,
       location,
-      locationId: locIdFromName(location),
-      day: c[iDay] || "",
-      dayKey: dayKey(c[iDay] || ""),
-      time: timeHHMM(c[iTime] || ""),
+      locationId,
+      day,
+      dayKey: dayKey(day),
+      time,
       capacity: Number(c[iCap]) || 18,
       checkedIn: Number(c[iIn]) || 0,
+      lateCancelled: Number(c[iLate]) || 0,
       booked: Number(c[iBook]) || 0,
       revenue: Number(c[iRev]) || 0,
-      date: c[iDate] || "",
+      date,
     });
   }
   return rows;
@@ -155,6 +180,13 @@ function push(map: Map<string, PerfRow[]>, key: string, row: PerfRow) {
   else map.set(key, [row]);
 }
 
+// Sheet exports often have irregular whitespace (e.g. "Kajol  Kanchan" with a double space from a
+// trailing-space FirstName). Without normalizing, exact/trainer-specific matches silently fail and
+// data falls back to a broad, unrelated aggregate — collapse whitespace and case before every key.
+function norm(s: string) {
+  return s.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
 export function setPerformanceRows(rows: PerfRow[]) {
   STORE = rows;
   IDX.exact.clear();
@@ -162,8 +194,8 @@ export function setPerformanceRows(rows: PerfRow[]) {
   IDX.trainerLoc.clear();
   IDX.classOnly.clear();
   for (const r of rows) {
-    const cls = r.className.toLowerCase();
-    const tr = r.trainer.toLowerCase();
+    const cls = norm(r.className);
+    const tr = norm(r.trainer);
     push(IDX.exact, `${r.locationId}|${r.dayKey}|${r.time}|${cls}|${tr}`, r);
     push(IDX.classTrainer, `${r.locationId}|${cls}|${tr}`, r);
     push(IDX.trainerLoc, `${r.locationId}|${tr}`, r);
@@ -172,13 +204,22 @@ export function setPerformanceRows(rows: PerfRow[]) {
 }
 
 export function lookupAgg(locationId: string, day: number, time: string, className: string, trainerName: string) {
-  const cls = className.toLowerCase();
-  const tr = trainerName.toLowerCase();
+  const cls = norm(className);
+  const tr = norm(trainerName);
   const exact = IDX.exact.get(`${locationId}|${day}|${time}|${cls}|${tr}`);
-  const ct = exact || IDX.classTrainer.get(`${locationId}|${cls}|${tr}`);
-  const tl = ct || IDX.trainerLoc.get(`${locationId}|${tr}`);
-  const any = tl || IDX.classOnly.get(cls) || [];
-  return aggregate(any);
+  const classTrainer = !exact && IDX.classTrainer.get(`${locationId}|${cls}|${tr}`);
+  const trainerLoc = !exact && !classTrainer && IDX.trainerLoc.get(`${locationId}|${tr}`);
+  const rows = exact || classTrainer || trainerLoc || IDX.classOnly.get(cls) || [];
+  const tier: "exact" | "trainer-format" | "trainer-only" | "format-only" | "none" = exact
+    ? "exact"
+    : classTrainer
+      ? "trainer-format"
+      : trainerLoc
+        ? "trainer-only"
+        : rows.length
+          ? "format-only"
+          : "none";
+  return { ...aggregate(rows), tier };
 }
 
 export function getPerformanceRows() {
@@ -189,8 +230,33 @@ export function hasPerformance() {
   return STORE.length > 0;
 }
 
+// Ranks every trainer who has actually taught this class format anywhere, by avg check-in then fill.
+export function topTrainersForClass(className: string, limit = 3) {
+  const cls = norm(className);
+  const byTrainer = new Map<string, PerfRow[]>();
+  for (const r of STORE) {
+    if (norm(r.className) !== cls) continue;
+    const list = byTrainer.get(r.trainer) || [];
+    list.push(r);
+    byTrainer.set(r.trainer, list);
+  }
+  return [...byTrainer.entries()]
+    .map(([trainer, rows]) => ({ trainer, agg: aggregate(rows) }))
+    .filter((x) => x.agg.sessions >= 2)
+    .sort((a, b) => b.agg.checkin - a.agg.checkin || b.agg.fill - a.agg.fill)
+    .slice(0, limit);
+}
+
 export async function loadGoogleSheet(token: string, spreadsheetId: string) {
-  const ranges = ["Sessions!A1:Z20000", "Sessions Performance Data!A1:Z20000", "Sheet1!A1:Z20000"];
+  // "Teacher Recurring" is class×day×time×location×trainer grain — exactly what lookupAgg needs.
+  // "Recurring" is the same grain without trainer (used as the classOnly/no-trainer fallback).
+  const ranges = [
+    "Teacher Recurring!A1:AG20000",
+    "Recurring!A1:AG20000",
+    "Sessions!A1:Z20000",
+    "Sessions Performance Data!A1:Z20000",
+    "Sheet1!A1:Z20000",
+  ];
   let lastErr = "No range worked";
   for (const range of ranges) {
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`;

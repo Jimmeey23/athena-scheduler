@@ -27,6 +27,7 @@ export function GridView({
   query,
   actions,
   onAdd,
+  onOpenCreate,
   onDropSession,
   onDayClick,
   onTimeClick,
@@ -39,6 +40,7 @@ export function GridView({
   query: string;
   actions: CardActions;
   onAdd?: (opt: { day: number; time: string; name: string; trainerId: string }) => void;
+  onOpenCreate?: (day: number, time: string) => void;
   onDropSession?: (sessionId: string, day: number, time: string) => void;
   onDayClick?: (day: number) => void;
   onTimeClick?: (time: string) => void;
@@ -95,7 +97,7 @@ export function GridView({
                         <ClassCard key={s.id} session={s} pinned={pinned.includes(s.id)} dimmed={!matches(s)} weekHours={trainerWeekHours(all, s.trainerId)} actions={actions} />
                       ))}
                       {cells.length === 0 && (
-                        <EmptySlot locationId={locationId} day={d.key} time={time} onAdd={(opt) => onAdd?.({ day: d.key, time, ...opt })} />
+                        <EmptySlot locationId={locationId} day={d.key} time={time} onAdd={(opt) => onAdd?.({ day: d.key, time, ...opt })} onOpenCreate={() => onOpenCreate?.(d.key, time)} />
                       )}
                     </div>
                   );
@@ -111,26 +113,35 @@ export function GridView({
 
 export function TimelineView({ sessions, onSelect }: { sessions: Session[]; onSelect: (s: Session) => void }) {
   const rows = [...sessions].sort((a, b) => a.day - b.day || a.time.localeCompare(b.time));
+  const byDay = DAYS.map((d) => ({ day: d, items: rows.filter((s) => s.day === d.key) })).filter((g) => g.items.length);
   return (
-    <div className="relative mx-auto max-w-3xl pb-10 pl-8">
-      <div className="absolute bottom-4 left-[18px] top-2 w-px bg-line" />
-      {rows.map((s) => {
-        const t = trainerById(s.trainerId);
-        return (
-          <button key={s.id} onClick={() => onSelect(s)} className="relative mb-4 flex w-full gap-4 text-left">
-            <span className="absolute -left-8 top-3 h-3 w-3 rounded-full bg-[#005eed] ring-4 ring-white" />
-            <div className="ticket w-full rounded-2xl p-4 ring-1 ring-line">
-              <p className="text-[11px] font-semibold text-[#005eed]">
-                {DAYS[s.day].full} · {s.time}
-              </p>
-              <p className="mt-1 text-lg font-medium">{s.name}</p>
-              <p className="text-sm text-mist">
-                {locationById(s.locationId).name} · {s.studio} · {t.name}
-              </p>
-            </div>
-          </button>
-        );
-      })}
+    <div className="mx-auto max-w-3xl space-y-8 pb-10">
+      {byDay.map(({ day, items }) => (
+        <div key={day.key}>
+          <div className="sticky top-0 z-10 -mx-2 mb-3 bg-[#f7f7f5]/95 px-2 py-2 backdrop-blur">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#005eed]">{day.full}</p>
+            <p className="text-xs text-mist">{items.length} classes</p>
+          </div>
+          <div className="relative pl-8">
+            <div className="absolute bottom-2 left-[18px] top-2 w-px bg-line" />
+            {items.map((s) => {
+              const t = trainerById(s.trainerId);
+              return (
+                <button key={s.id} onClick={() => onSelect(s)} className="relative mb-4 flex w-full gap-4 text-left">
+                  <span className="absolute -left-8 top-3 h-3 w-3 rounded-full bg-[#005eed] ring-4 ring-white" />
+                  <div className="ticket w-full rounded-2xl p-4 ring-1 ring-line">
+                    <p className="text-[11px] font-semibold text-[#005eed]">{s.time}</p>
+                    <p className="mt-1 text-lg font-medium">{s.name}</p>
+                    <p className="text-sm text-mist">
+                      {locationById(s.locationId).name} · {s.studio} · {t.name}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -233,16 +244,16 @@ const LOC_CODE: Record<string, { code: string; city: string }> = {
   supreme: { code: "SU", city: "MUMBAI" },
 };
 
-export function MultiView({ all, actions }: { all: Session[]; actions: CardActions }) {
+export function MultiView({ all, actions, onOpenCreate }: { all: Session[]; actions: CardActions; onOpenCreate?: (locationId: string, day: number, time: string) => void }) {
   const times = [...new Set([...TIMES, ...all.map((s) => s.time)])].sort();
   return (
     <div className="overflow-auto pb-8">
       <h2 className="mb-4 text-2xl font-semibold tracking-tight">Multi-Location Schedule</h2>
-      <div className="min-w-[2200px]">
-        <div className="grid" style={{ gridTemplateColumns: `72px repeat(7, minmax(280px, 1fr))` }}>
-          <div className="px-2 py-3 text-[11px] font-semibold uppercase text-mist">Time</div>
+      <div className="min-w-[2000px] rounded-3xl border border-line bg-white">
+        <div className="grid" style={{ gridTemplateColumns: `88px repeat(7, minmax(240px, 1fr))` }}>
+          <div className="sticky left-0 z-20 border-b border-r border-line bg-white px-2 py-3 text-[11px] font-semibold uppercase text-mist">Time</div>
           {DAYS.map((d) => (
-            <div key={d.key} className="border-b border-line px-2 py-3">
+            <div key={d.key} className="border-b border-l border-line px-2 py-3">
               <div className="flex items-baseline gap-2">
                 <span className="text-sm font-bold">{d.label}</span>
                 <span className="text-xs text-mist">{d.full}</span>
@@ -262,20 +273,27 @@ export function MultiView({ all, actions }: { all: Session[]; actions: CardActio
           ))}
           {times.map((time) => (
             <div key={time} className="contents">
-              <div className="border-t border-line py-6 pr-2 text-right">
+              <div className="sticky left-0 z-20 border-t border-r border-line bg-white py-4 pr-2 text-right">
                 <div className="text-sm font-bold text-[#c2410c]">{time}</div>
                 <div className="text-[9px] uppercase text-mist">{time < "12:00" ? "Prime" : time < "17:00" ? "Mid" : "Eve"}</div>
               </div>
               {DAYS.map((d) => (
-                <div key={d.key} className="grid grid-cols-5 gap-1 border-t border-line p-1">
+                <div key={d.key} className="grid grid-cols-5 gap-1 border-l border-t border-line bg-[#fafafa] p-1">
                   {LOCATIONS.map((l) => {
                     const cards = all.filter((s) => s.day === d.key && s.time === time && s.locationId === l.id);
                     return (
-                      <div key={l.id} className="min-h-[88px] rounded-xl">
+                      <div key={l.id} className="min-w-0 space-y-1 rounded-lg">
                         {cards.map((s) => (
-                          <ClassCard key={s.id} session={s} weekHours={trainerWeekHours(all, s.trainerId)} actions={actions} />
+                          <ClassCard key={s.id} session={s} compact weekHours={trainerWeekHours(all, s.trainerId)} actions={actions} />
                         ))}
-                        {!cards.length && <div className="flex h-full min-h-[88px] items-center justify-center text-lg text-mist/40">+</div>}
+                        {!cards.length && (
+                          <button
+                            onClick={() => onOpenCreate?.(l.id, d.key, time)}
+                            className="flex h-[52px] w-full items-center justify-center rounded-lg text-base text-mist/30 hover:bg-white hover:text-[#005eed]"
+                          >
+                            +
+                          </button>
+                        )}
                       </div>
                     );
                   })}

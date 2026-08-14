@@ -71,11 +71,11 @@ export const DEFAULT_SETTINGS: Settings = {
       "Cardio Barre": { min: 9, max: 12 },
       "Mat 57": { min: 8, max: 11 },
       PowerCycle: { min: 15, max: 17 },
-      "Strength Lab": { min: 2, max: 4 },
+      "Strength Lab": { min: 3, max: 6 },
       FIT: { min: 12, max: 15 },
       "Amped Up!": { min: 1, max: 2 },
       HIIT: { min: 1, max: 2 },
-      "Back Body Blaze": { min: 0, max: 2 },
+      "Back Body Blaze": { min: 0, max: 3 },
       Recovery: { min: 0, max: 2 },
     },
     supreme: {
@@ -84,6 +84,9 @@ export const DEFAULT_SETTINGS: Settings = {
       "Mat 57": { min: 7, max: 10 },
       PowerCycle: { min: 12, max: 16 },
       FIT: { min: 10, max: 14 },
+      "Amped Up!": { min: 1, max: 2 },
+      HIIT: { min: 1, max: 2 },
+      "Back Body Blaze": { min: 0, max: 3 },
     },
     kenkere: {
       "Barre 57": { min: 14, max: 18 },

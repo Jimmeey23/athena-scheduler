@@ -611,38 +611,57 @@ export function SettingsView({
 
         {section === "locations" && (
           <div className="grid gap-3 md:grid-cols-2">
-            {LOCATIONS.map((l) => (
-              <Panel key={l.id} className="p-5">
-                <p className="text-[10px] uppercase tracking-[0.16em] text-mist">{l.area}</p>
-                <h3 className="font-serif text-2xl">{l.name}</h3>
-                <label className="mt-2 block text-sm text-mist">
-                  Weekly floor
-                  <input
-                    type="number"
-                    value={settings.floors?.[l.id] ?? l.weeklyFloor}
-                    onChange={(e) => patch({ floors: { ...settings.floors, [l.id]: Number(e.target.value) } })}
-                    className="mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ivory"
-                  />
-                </label>
-                <label className="mt-2 block text-sm text-mist">
-                  Rooms (comma separated)
-                  <input
-                    value={l.rooms.join(", ")}
-                    onChange={(e) =>
-                      patch({
-                        locations: (settings.locations || LOCATIONS).map((x) =>
-                          x.id === l.id ? { ...x, rooms: e.target.value.split(",").map((r) => r.trim()).filter(Boolean) } : x
-                        ),
-                      })
-                    }
-                    className="mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ivory"
-                  />
-                </label>
-                <p className="mt-3 text-xs text-mist">
-                  {l.id === "kenkere" ? "PowerCycle is never scheduled here." : l.id === "kwality" ? "Only house allowed to run Strength Lab." : l.id === "supreme" || l.id === "kwality" ? "Mumbai PowerCycle eligible." : "Boutique lane — limited rooms."}
-                </p>
-              </Panel>
-            ))}
+            {(settings.locations?.length ? settings.locations : LOCATIONS).map((l) => {
+              const updateLoc = (patchLoc: Partial<(typeof LOCATIONS)[number]>) =>
+                patch({
+                  locations: (settings.locations?.length ? settings.locations : LOCATIONS).map((x) => (x.id === l.id ? { ...x, ...patchLoc } : x)),
+                });
+              return (
+                <Panel key={l.id} className="p-5">
+                  <label className="block text-[10px] uppercase tracking-[0.16em] text-mist">
+                    Area
+                    <input value={l.area} onChange={(e) => updateLoc({ area: e.target.value })} className="mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-sm text-ivory" />
+                  </label>
+                  <label className="mt-2 block">
+                    <input value={l.name} onChange={(e) => updateLoc({ name: e.target.value })} className="w-full rounded-xl border border-line bg-white px-3 py-2 font-serif text-xl text-ivory" />
+                  </label>
+                  <label className="mt-2 block text-sm text-mist">
+                    Weekly floor
+                    <input
+                      type="number"
+                      value={settings.floors?.[l.id] ?? l.weeklyFloor}
+                      onChange={(e) => patch({ floors: { ...settings.floors, [l.id]: Number(e.target.value) } })}
+                      className="mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ivory"
+                    />
+                  </label>
+                  <label className="mt-2 block text-sm text-mist">
+                    Rooms (comma separated)
+                    <input
+                      value={l.rooms.join(", ")}
+                      onChange={(e) => updateLoc({ rooms: e.target.value.split(",").map((r) => r.trim()).filter(Boolean) })}
+                      className="mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ivory"
+                    />
+                  </label>
+                  <p className="mt-3 text-[11px] uppercase tracking-wider text-mist">Room capacity</p>
+                  <div className="mt-1 grid grid-cols-2 gap-2">
+                    {l.rooms.map((room) => (
+                      <label key={room} className="text-xs text-mist">
+                        {room}
+                        <input
+                          type="number"
+                          value={l.roomCapacity?.[room] ?? 18}
+                          onChange={(e) => updateLoc({ roomCapacity: { ...l.roomCapacity, [room]: Number(e.target.value) } })}
+                          className="mt-1 w-full rounded-lg border border-line bg-white px-2 py-1 text-sm text-ivory"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <p className="mt-3 text-xs text-mist">
+                    {l.id === "kenkere" ? "PowerCycle is never scheduled here." : l.id === "kwality" ? "Only house allowed to run Strength Lab." : l.id === "supreme" || l.id === "kwality" ? "Mumbai PowerCycle eligible." : "Boutique lane — limited rooms."}
+                  </p>
+                </Panel>
+              );
+            })}
           </div>
         )}
       </div>

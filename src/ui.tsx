@@ -61,14 +61,45 @@ export function ClassCard({
   pinned,
   weekHours,
   actions,
+  compact,
 }: {
   session: Session;
   dimmed?: boolean;
   pinned?: boolean;
   weekHours?: number;
   actions: CardActions;
+  compact?: boolean;
 }) {
   const trainer = trainerById(session.trainerId);
+  if (compact) {
+    return (
+      <div
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData("text/session-id", session.id);
+          e.dataTransfer.effectAllowed = "move";
+        }}
+        className={`ticket group relative w-full cursor-grab overflow-hidden rounded-xl p-2 text-left transition ${dimmed ? "opacity-30" : ""} ${
+          session.tags.includes("violation") ? "ring-1 ring-red-300" : "ring-1 ring-line hover:ring-[#005eed]/40"
+        }`}
+      >
+        <button className="w-full text-left" onClick={() => actions.onSelect(session)}>
+          <span className="absolute inset-y-2 left-0 w-0.5 rounded-full" style={{ background: session.accent }} />
+          <p className="truncate pl-1.5 text-[11px] font-medium leading-tight text-ivory">{session.name}</p>
+          <div className="mt-1 flex items-center gap-1 pl-1.5">
+            <img src={trainer.photo} alt="" className="h-4 w-4 shrink-0 rounded-full object-cover ring-1 ring-line" />
+            <span className="min-w-0 flex-1 truncate text-[9px] text-ivory/70">{trainer.name.split(" ")[0]}</span>
+            <span className="shrink-0 text-[9px] font-medium tabular-nums text-mist">{session.fill}%</span>
+          </div>
+        </button>
+        <div className="pointer-events-none absolute inset-x-1 top-1 flex justify-end opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
+          <IconBtn title="Remove class" onClick={() => actions.onRemove?.(session)}>
+            <Trash2 className="h-2.5 w-2.5" />
+          </IconBtn>
+        </div>
+      </div>
+    );
+  }
   return (
     <div
       draggable
@@ -146,43 +177,47 @@ export function EmptySlot({
   day,
   time,
   onAdd,
+  onOpenCreate,
 }: {
   locationId: string;
   day: number;
   time: string;
   onAdd?: (opt: { name: string; trainerId: string }) => void;
+  onOpenCreate?: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const hist = open ? slotHistory(locationId, day, time).slice(0, 4) : [];
+  const [hover, setHover] = useState(false);
+  const hist = hover ? slotHistory(locationId, day, time).slice(0, 3) : [];
+  const top = hist[0];
   return (
-    <div className="group relative min-h-[72px] rounded-2xl border border-dashed border-line" onMouseEnter={() => setOpen(true)}>
-      <div className="pointer-events-none invisible absolute left-0 top-full z-30 w-[260px] pt-1 group-hover:visible group-hover:pointer-events-auto">
-        <div className="rounded-2xl border border-line bg-white p-3 shadow-xl">
-          <p className="text-[10px] uppercase tracking-wider text-mist">
-            Historic {DAYS[day].label} {time}
-          </p>
-          {hist.length === 0 && <p className="mt-2 text-xs text-mist">No proven combo for this slot.</p>}
+    <div
+      className="group relative min-h-[72px] cursor-pointer overflow-hidden rounded-2xl border border-dashed border-line p-1.5 transition hover:border-[#005eed]/30"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={() => onOpenCreate?.()}
+      title="Click to create a class in this slot"
+    >
+      {!hover && <span className="flex h-full items-center justify-center text-lg text-mist/30">+</span>}
+      {hover && (
+        <div className="space-y-1 opacity-60 transition-opacity duration-150 hover:opacity-90">
+          <p className="text-[9px] uppercase tracking-wider text-mist">Historic {DAYS[day].label} {time}</p>
+          {!top && <p className="text-[10px] text-mist">No proven combo \u2014 click to build one manually.</p>}
           {hist.map((h) => {
             const t = trainerById(h.trainerId);
             return (
               <button
                 key={h.name + h.trainerId}
-                onClick={() => onAdd?.({ name: h.name, trainerId: h.trainerId })}
-                className="mt-2 flex w-full items-start justify-between rounded-xl bg-ink px-2 py-1.5 text-left text-[11px] hover:ring-1 hover:ring-[#005eed]/30"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onAdd?.({ name: h.name, trainerId: h.trainerId });
+                }}
+                className="block w-full rounded-lg px-1 py-0.5 text-left text-[10px] text-mist hover:bg-white/60 hover:text-ivory"
               >
-                <span>
-                  <span className="block font-medium text-ivory">{h.name}</span>
-                  <span className="text-mist">{t.name}</span>
-                </span>
-                <span className="text-right text-mist">
-                  {h.fill}% · {h.checkin} avg
-                  <span className="block">{h.sessions} sessions</span>
-                </span>
+                <span className="font-medium">{h.name}</span> · {t.name.split(" ")[0]} · {h.checkin} avg · {h.fill}% fill · {h.sessions} classes
               </button>
             );
           })}
         </div>
-      </div>
+      )}
     </div>
   );
 }

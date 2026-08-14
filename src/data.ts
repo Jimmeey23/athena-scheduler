@@ -50,6 +50,7 @@ export const LOCATIONS: Location[] = [
     weeklyFloor: 70,
     aliases: ["kwality", "kemp", "kemp's corner", "kempscorner"],
     roomTypes: { cycle: "PowerCycle Studio", strength: "Strength Lab" },
+    roomCapacity: { "Studio 1": 22, "Studio 2": 13, "Strength Lab": 7, "PowerCycle Studio": 10 },
   },
   {
     id: "supreme",
@@ -60,6 +61,7 @@ export const LOCATIONS: Location[] = [
     weeklyFloor: 65,
     aliases: ["supreme", "bandra", "bandra west", "hq"],
     roomTypes: { cycle: "PowerCycle Studio" },
+    roomCapacity: { "Studio 1": 13, "Studio 2": 13, "PowerCycle Studio": 10 },
   },
   {
     id: "kenkere",
@@ -69,6 +71,7 @@ export const LOCATIONS: Location[] = [
     accent: "#0e1729",
     weeklyFloor: 55,
     aliases: ["kenkere", "juhu"],
+    roomCapacity: { "Studio 1": 13, "Studio 2": 13, "Studio 3": 13 },
   },
   {
     id: "courtside",
@@ -78,6 +81,7 @@ export const LOCATIONS: Location[] = [
     accent: "#005eed",
     weeklyFloor: 6,
     aliases: ["courtside", "court", "lower parel"],
+    roomCapacity: { "Studio 1": 13 },
   },
   {
     id: "copper",
@@ -87,6 +91,7 @@ export const LOCATIONS: Location[] = [
     accent: "#005eed",
     weeklyFloor: 9,
     aliases: ["copper", "cloves", "colaba", "copper & cloves", "copper and cloves"],
+    roomCapacity: { "Studio 1": 13 },
   },
 ];
 
@@ -155,22 +160,24 @@ export const TRAINERS: Trainer[] = [
   { id: "veena", name: "Veena Nair", photo: photo("Veena.jpeg"), specialty: "Mat · Recovery", tier: 2, active: true, certs: certs(["mat", "recovery", "barre"]), access: { copper: loc([0, 2, 4, 6], [1], 2, 4.5), kenkere: loc([5, 6], [2], 2, 4.3) } },
 ];
 
+// Durations drive room/trainer overlap checks — must match reality exactly. Only Strength Lab,
+// PowerCycle Express, and Recovery run 30 minutes; every other Express class runs 45; everything else 60.
 export const FORMATS: Format[] = [
-  { name: "Barre 57", studio: "Studio 2", duration: 50, accent: "#0e1729", cert: "barre", family: "barre" },
-  { name: "Barre 57 Express", studio: "Studio 2", duration: 30, accent: "#0e1729", cert: "barre", family: "barre", express: true, fullName: "Barre 57" },
-  { name: "Cardio Barre", studio: "Studio 3", duration: 50, accent: "#005eed", cert: "cardio", family: "barre" },
-  { name: "Cardio Barre Plus", studio: "Studio 2", duration: 50, accent: "#0e1729", cert: "cardio", family: "barre" },
-  { name: "Cardio Barre Express", studio: "Studio 3", duration: 30, accent: "#005eed", cert: "cardio", family: "barre", express: true, fullName: "Cardio Barre" },
-  { name: "Mat 57", studio: "Studio 1", duration: 50, accent: "#005eed", cert: "mat", family: "mat" },
-  { name: "Mat 57 Express", studio: "Studio 1", duration: 30, accent: "#005eed", cert: "mat", family: "mat", express: true, fullName: "Mat 57" },
-  { name: "PowerCycle", studio: "PowerCycle Studio", duration: 45, accent: "#0e1729", cert: "cycle", family: "cycle" },
+  { name: "Barre 57", studio: "Studio 2", duration: 60, accent: "#0e1729", cert: "barre", family: "barre" },
+  { name: "Barre 57 Express", studio: "Studio 2", duration: 45, accent: "#0e1729", cert: "barre", family: "barre", express: true, fullName: "Barre 57" },
+  { name: "Cardio Barre", studio: "Studio 3", duration: 60, accent: "#005eed", cert: "cardio", family: "barre" },
+  { name: "Cardio Barre Plus", studio: "Studio 2", duration: 60, accent: "#0e1729", cert: "cardio", family: "barre" },
+  { name: "Cardio Barre Express", studio: "Studio 3", duration: 45, accent: "#005eed", cert: "cardio", family: "barre", express: true, fullName: "Cardio Barre" },
+  { name: "Mat 57", studio: "Studio 1", duration: 60, accent: "#005eed", cert: "mat", family: "mat" },
+  { name: "Mat 57 Express", studio: "Studio 1", duration: 45, accent: "#005eed", cert: "mat", family: "mat", express: true, fullName: "Mat 57" },
+  { name: "PowerCycle", studio: "PowerCycle Studio", duration: 60, accent: "#0e1729", cert: "cycle", family: "cycle" },
   { name: "PowerCycle Express", studio: "PowerCycle Studio", duration: 30, accent: "#0e1729", cert: "cycle", family: "cycle", express: true, fullName: "PowerCycle" },
-  { name: "Strength Lab", studio: "Strength Lab", duration: 50, accent: "#005eed", cert: "strength", family: "strength" },
-  { name: "FIT", studio: "Studio 1", duration: 50, accent: "#005eed", cert: "fit", family: "fit" },
-  { name: "Amped Up!", studio: "Studio 1", duration: 45, accent: "#0e1729", cert: "amped", family: "special" },
-  { name: "HIIT", studio: "Studio 3", duration: 45, accent: "#005eed", cert: "hiit", family: "special" },
-  { name: "Back Body Blaze", studio: "Studio 1", duration: 50, accent: "#0e1729", cert: "bbb", family: "special" },
-  { name: "Recovery", studio: "Studio 2", duration: 45, accent: "#005eed", cert: "recovery", family: "special" },
+  { name: "Strength Lab", studio: "Strength Lab", duration: 30, accent: "#005eed", cert: "strength", family: "strength" },
+  { name: "FIT", studio: "Studio 1", duration: 60, accent: "#005eed", cert: "fit", family: "fit" },
+  { name: "Amped Up!", studio: "Studio 1", duration: 60, accent: "#0e1729", cert: "amped", family: "special" },
+  { name: "HIIT", studio: "Studio 3", duration: 60, accent: "#005eed", cert: "hiit", family: "special" },
+  { name: "Back Body Blaze", studio: "Studio 1", duration: 60, accent: "#0e1729", cert: "bbb", family: "special" },
+  { name: "Recovery", studio: "Studio 2", duration: 30, accent: "#005eed", cert: "recovery", family: "special" },
 ];
 
 export const FORMAT_PRIORITY: Record<string, string[]> = {
@@ -179,6 +186,17 @@ export const FORMAT_PRIORITY: Record<string, string[]> = {
   "Strength Lab": ["atulan", "mrigakshi", "anisha", "reshma", "richard"],
   FIT: ["atulan", "mrigakshi", "anisha", "reshma", "richard"],
 };
+
+export type ClassLevel = "Beginner" | "Intermediate" | "Advanced";
+
+const BEGINNER_FORMATS = new Set(["Barre 57", "Barre 57 Express", "PowerCycle", "PowerCycle Express", "Recovery"]);
+const ADVANCED_FORMATS = new Set(["HIIT", "Amped Up!", "Trainers Choice", "Strength Lab"]);
+
+export function levelOf(formatName: string): ClassLevel {
+  if (BEGINNER_FORMATS.has(formatName)) return "Beginner";
+  if (ADVANCED_FORMATS.has(formatName)) return "Advanced";
+  return "Intermediate";
+}
 
 export const TIER1_PRIORITY = ["anisha", "rohan", "reshma", "atulan", "pranjali", "karanvir", "mrigakshi", "vivaran", "pushyank", "kajol", "shruti"];
 

@@ -33,6 +33,7 @@ export type Location = {
   weeklyFloor: number;
   aliases?: string[];
   roomTypes?: Record<string, string>;
+  roomCapacity?: Record<string, number>;
 };
 
 export type CertKey =
