@@ -90,6 +90,15 @@ export function SettingsView({
                 <div className="flex gap-2">
                   <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" className="rounded-xl border border-line bg-ink px-3 py-2 text-sm" />
                   <button
+                    className="rounded-xl border border-line px-3 py-2 text-xs text-mist hover:text-ivory"
+                    onClick={() => {
+                      if (!window.confirm("Reset all trainers to the app's built-in defaults? This discards any saved tier/access/cert edits.")) return;
+                      patch({ trainers: structuredClone(TRAINERS) });
+                    }}
+                  >
+                    Reset roster to defaults
+                  </button>
+                  <button
                     className="rounded-xl bg-[#005eed] px-3 py-2 text-xs text-white"
                     onClick={() => {
                       const id = `tr-${Date.now()}`;
@@ -238,41 +247,88 @@ export function SettingsView({
           </Panel>
         )}
 
-        {section === "certs" && (
-          <Panel className="overflow-x-auto p-5">
-            <h2 className="font-serif text-2xl">Certifications</h2>
-            <p className="mb-4 text-sm text-mist">Specialist formats require a matching cert. Uncertified trainers are never auto-assigned.</p>
-            <table className="w-full text-left text-[11px]">
-              <thead>
-                <tr className="text-mist">
-                  <th className="py-2">Trainer</th>
-                  {CERTS.map((c) => (
-                    <th key={c} className="px-1 uppercase">
-                      {c}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {roster.map((t) => (
-                  <tr key={t.id} className="border-t border-line">
-                    <td className="py-2 pr-3">{t.name}</td>
-                    {CERTS.map((c) => (
-                      <td key={c} className="text-center">
-                        <button
-                          onClick={() => updateTrainer(t.id, { ...t, certs: { ...t.certs, [c]: !t.certs[c] } })}
-                          className={t.certs[c] ? "text-[#005eed]" : "text-line"}
-                        >
-                          {t.certs[c] ? "●" : "○"}
-                        </button>
-                      </td>
+        {section === "certs" && (() => {
+          const formatList = settings.formats?.length ? settings.formats : FORMATS;
+          const setAll = (value: boolean) =>
+            patch({
+              trainers: roster.map((t) => ({
+                ...t,
+                certs: { ...t.certs, ...Object.fromEntries(formatList.map((f) => [f.cert, value])) },
+              })),
+            });
+          const setColumn = (cert: (typeof formatList)[number]["cert"], value: boolean) =>
+            patch({ trainers: roster.map((t) => ({ ...t, certs: { ...t.certs, [cert]: value } })) });
+          const setRow = (trainerId: string, value: boolean) => {
+            const t = roster.find((x) => x.id === trainerId);
+            if (!t) return;
+            updateTrainer(trainerId, { ...t, certs: { ...t.certs, ...Object.fromEntries(formatList.map((f) => [f.cert, value])) } });
+          };
+          return (
+            <Panel className="overflow-x-auto p-5">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="font-serif text-2xl">Certifications</h2>
+                  <p className="text-sm text-mist">Every format requires a matching cert. Uncertified trainers are never auto-assigned.</p>
+                </div>
+                <div className="flex gap-2">
+                  <button className="rounded-lg border border-line px-3 py-1.5 text-xs text-mist hover:text-ivory" onClick={() => setAll(true)}>
+                    Qualify all
+                  </button>
+                  <button className="rounded-lg border border-line px-3 py-1.5 text-xs text-mist hover:text-ivory" onClick={() => setAll(false)}>
+                    Disqualify all
+                  </button>
+                </div>
+              </div>
+              <table className="w-full text-left text-[11px]">
+                <thead>
+                  <tr className="text-mist">
+                    <th className="py-2">Trainer</th>
+                    {formatList.map((f) => (
+                      <th key={f.name} className="px-1 text-center">
+                        <div className="whitespace-nowrap">{f.name}</div>
+                        <div className="mt-1 flex justify-center gap-1">
+                          <button className="text-[#005eed]" title={`Qualify all for ${f.name}`} onClick={() => setColumn(f.cert, true)}>
+                            ●
+                          </button>
+                          <button className="text-line" title={`Disqualify all for ${f.name}`} onClick={() => setColumn(f.cert, false)}>
+                            ○
+                          </button>
+                        </div>
+                      </th>
                     ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </Panel>
-        )}
+                </thead>
+                <tbody>
+                  {roster.map((t) => (
+                    <tr key={t.id} className="border-t border-line">
+                      <td className="py-2 pr-3">
+                        <div className="flex items-center gap-2">
+                          <span>{t.name}</span>
+                          <button className="text-[#005eed]" title={`Qualify ${t.name} for everything`} onClick={() => setRow(t.id, true)}>
+                            ●
+                          </button>
+                          <button className="text-line" title={`Disqualify ${t.name} from everything`} onClick={() => setRow(t.id, false)}>
+                            ○
+                          </button>
+                        </div>
+                      </td>
+                      {formatList.map((f) => (
+                        <td key={f.name} className="text-center">
+                          <button
+                            onClick={() => updateTrainer(t.id, { ...t, certs: { ...t.certs, [f.cert]: !t.certs[f.cert] } })}
+                            className={t.certs[f.cert] ? "text-[#005eed]" : "text-line"}
+                          >
+                            {t.certs[f.cert] ? "●" : "○"}
+                          </button>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Panel>
+          );
+        })()}
 
         {section === "leave" && (
           <Panel className="p-5">
@@ -611,6 +667,17 @@ export function SettingsView({
 
         {section === "locations" && (
           <div className="grid gap-3 md:grid-cols-2">
+            <div className="md:col-span-2 flex justify-end">
+              <button
+                className="rounded-xl border border-line px-3 py-2 text-xs text-mist hover:text-ivory"
+                onClick={() => {
+                  if (!window.confirm("Reset all locations to the app's built-in defaults? This discards any saved room/capacity/floor edits.")) return;
+                  patch({ locations: structuredClone(LOCATIONS) });
+                }}
+              >
+                Reset locations to defaults
+              </button>
+            </div>
             {(settings.locations?.length ? settings.locations : LOCATIONS).map((l) => {
               const updateLoc = (patchLoc: Partial<(typeof LOCATIONS)[number]>) =>
                 patch({

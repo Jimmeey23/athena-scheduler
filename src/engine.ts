@@ -82,13 +82,25 @@ function countFormatFamily(sessions: Session[], locationId: string, family: stri
 
 function hasAdjacentSameFormat(sessions: Session[], locationId: string, day: number, time: string, format: string, excludeId?: string) {
   const start = toMin(time);
+  const family = familyKey(format);
   return sessions
     .filter((s) => s.id !== excludeId && s.locationId === locationId && s.day === day)
     .some((s) => {
-      if (s.name !== format) return false;
+      // Same family (e.g. Barre 57 / Barre 57 Express) counts too — an express class right
+      // next to its full-length sibling reads as redundant back-to-back programming.
+      if (familyKey(s.name) !== family) return false;
       const delta = Math.abs(toMin(s.time) - start);
       return delta <= 75;
     });
+}
+
+// Zero-history "experimental" placements are capped at 15% of a location's classes so class-mix
+// filler never dominates a proven, evidence-backed schedule.
+const EXPERIMENTAL_QUOTA = 0.15;
+function experimentalQuotaOk(sessions: Session[], locationId: string) {
+  const total = sessions.filter((s) => s.locationId === locationId).length;
+  const exp = sessions.filter((s) => s.locationId === locationId && s.tags.includes("experimental")).length;
+  return exp < Math.ceil(EXPERIMENTAL_QUOTA * (total + 1));
 }
 
 function allowedTime(day: number, time: string, settings?: Settings) {
@@ -139,8 +151,12 @@ export function scoreCombo(
   const attendance = Math.min(w.weightCheckin * 100, (h.checkin / 10) * w.weightCheckin * 100);
   const fill = (h.fill / 100) * w.weightFill * 100;
   const trend = ((h.trend + 6) / 10) * w.weightTrend * 100;
-  const oneOff = h.sessions < 4;
-  const proven = oneOff ? 0 : Math.min(12, (h.sessions / 40) * 12);
+  // A trainer with few personal runs but strong checkin/fill (i.e. slot-level evidence backs them up)
+  // shouldn't be treated the same as a truly blind guess — only cap hard when both run count AND
+  // performance are weak.
+  const strongEvidence = h.checkin >= 10 && h.fill >= 60;
+  const oneOff = h.sessions < 4 && !strongEvidence;
+  const proven = oneOff ? 0 : Math.min(12, (Math.max(h.sessions, strongEvidence ? 12 : 0) / 40) * 12);
   const tier = ((5 - trainer.tier) / 4) * w.weightTier * 100;
   const combo = FORMAT_PRIORITY[format]?.includes(trainer.id) ? 6 : 0;
   let score = attendance + fill + trend + proven + tier + combo;
@@ -227,6 +243,14 @@ type Book = {
   shiftTrainers: Record<string, string[]>;
 };
 
+type CandidateOptions = {
+  families?: string[];
+  names?: string[];
+  ignoreMixMax?: boolean;
+  allowExperimental?: boolean;
+  relaxSoft?: boolean;
+};
+
 function emptyBook(): Book {
   return {
     hours: {},
@@ -261,7 +285,8 @@ function canUseTrainer(
   duration: number,
   format: Format,
   settings: Settings,
-  book: Book
+  book: Book,
+  opts: { relaxSoft?: boolean } = {}
 ) {
   if (!t.active || settings.inactiveTrainers.includes(t.id)) return "inactive";
   if (!t.certs[format.cert]) return "uncertified";
@@ -275,16 +300,16 @@ function canUseTrainer(
   if (tm < toMin(access.start) || tm > toMin(access.end)) return "window";
   const dayKey = `${t.id}|${day}`;
   const workedDays = trainerWorkedDays(book, t.id);
-  if (!workedDays.includes(day) && workedDays.length >= 6) return "week-off-minimum";
-  if ((book.dayCount[dayKey] ?? 0) >= access.maxPerDay) return "day-class-cap";
+  if (!opts.relaxSoft && !workedDays.includes(day) && workedDays.length >= 6) return "week-off-minimum";
+  if ((book.dayCount[dayKey] ?? 0) >= access.maxPerDay + (opts.relaxSoft ? 1 : 0)) return "day-class-cap";
   const limits = limitsOf(settings);
   if ((book.hours[dayKey] ?? 0) + duration / 60 > limits.dailyHourCap) return "day-hour-cap";
-  if ((book.weekHours[t.id] ?? 0) + duration / 60 > limits.weeklyCap) return "week-cap";
+  if ((book.weekHours[t.id] ?? 0) + duration / 60 > limits.weeklyCap + (opts.relaxSoft ? 2 : 0)) return "week-cap";
   // A trainer can't be in two classes whose time windows overlap, even if they don't share a start time.
   if (overlapsAny(book.trainerIntervals[dayKey], tm, tm + duration)) return "overlap";
   const sh = shiftOf(time);
   const used = book.shift[dayKey];
-  if (settings.ai.enforceAmPm !== false && used && used !== sh) return "am-pm-split";
+  if (!opts.relaxSoft && settings.ai.enforceAmPm !== false && used && used !== sh) return "am-pm-split";
   const locs = book.dayLocs[dayKey] || [];
   if (locs.length && !locs.includes(locationId)) {
     const secondOk = BOUTIQUE.has(locationId) && (!settings.ai.boutiqueSameShiftOnly || !used || used === sh);
@@ -293,7 +318,11 @@ function canUseTrainer(
   const locKey = `${t.id}|${day}|${sh}`;
   if (book.locShift[locKey] && book.locShift[locKey] !== locationId) return "multi-location-shift";
   const cluster = book.shiftTrainers[`${locationId}|${day}|${sh}`] || [];
-  if (settings.ai.clusterTrainers && cluster.length >= (settings.ai.maxTrainersPerShift || 3) && !cluster.includes(t.id)) return "cluster-full";
+  // Specialty-room formats (PowerCycle/Strength Lab) run in their own dedicated single room, so
+  // they don't compete for the other studios — exempt them from the shift-cluster cap, otherwise
+  // generalist trainers monopolize the 3-trainer cluster and specialty trainers never get a slot.
+  const clusterExempt = format.family === "cycle" || format.family === "strength";
+  if (!opts.relaxSoft && !clusterExempt && settings.ai.clusterTrainers && cluster.length >= (settings.ai.maxTrainersPerShift || 3) && !cluster.includes(t.id)) return "cluster-full";
   return null;
 }
 
@@ -411,9 +440,11 @@ function makeSession(
     "format-only": `for ${format.name} citywide (no history for ${trainer.name} with this format at all)`,
     none: `\u2014 no historic data found for this combination`,
   };
-  const reason = scored.oneOff
-    ? "Held only as a last-resort cover — one-off history is ranked below proven combos."
-    : `Assigned because ${trainer.name} \u00d7 ${format.name} ${tierText[h.tier] ?? tierText.exact} averages ${h.checkin} check-ins and ${h.fill}% fill across ${h.sessions} historic sessions. Attendance and fill outrank tier.`;
+  const reason = extra.includes("experimental")
+    ? `Placed with no historic data for ${trainer.name} \u00d7 ${format.name} at this slot — used only to round out class-mix variety, within the 15% experimental quota.`
+    : scored.oneOff
+      ? "Held only as a last-resort cover — one-off history is ranked below proven combos."
+      : `Assigned because ${trainer.name} \u00d7 ${format.name} ${tierText[h.tier] ?? tierText.exact} averages ${h.checkin} check-ins and ${h.fill}% fill across ${h.sessions} historic sessions. Attendance and fill outrank tier.`;
   // Room capacity is set by the venue's actual room, not just the class family — historic
   // attendance for the slot is capped against it so fill% reflects the true room ceiling.
   const house = houses(settings).find((l) => l.id === locationId);
@@ -496,10 +527,15 @@ function pickCandidate(
   optimize: boolean,
   progress = 0,
   relaxed = false,
-  opts: { families?: string[]; names?: string[]; ignoreMixMax?: boolean } = {}
+  opts: CandidateOptions = {}
 ) {
   const formats = shuffle(
     catalog(settings).filter((f) => {
+      if (opts.names?.includes(f.name) && (globalThis as any).DEBUG_ENGINE) {
+        const h = settings ? houses(settings) : LOCATIONS;
+        const hh = h.find((l) => l.id === locationId);
+        console.log("candidate-check", locationId, f.name, "family=", f.family, "roomTypes=", JSON.stringify(hh?.roomTypes), "allowed=", formatAllowed(locationId, f, settings), "mixOk=", mixOk(locationId, f.name, settings, book));
+      }
       if (!formatAllowed(locationId, f, settings)) return false;
       if (opts.families?.length && !opts.families.includes(familyKey(f.name))) return false;
       if (opts.names?.length && !opts.names.includes(f.name)) return false;
@@ -512,13 +548,14 @@ function pickCandidate(
     roster(settings).filter((t) => t.active && !settings.inactiveTrainers.includes(t.id)),
     rand
   );
-  const ranked: Array<{ format: Format; trainer: Trainer; room: string; score: number; h: ReturnType<typeof historicFor> }> = [];
+  const ranked: Array<{ format: Format; trainer: Trainer; room: string; score: number; h: ReturnType<typeof historicFor>; experimental: boolean }> = [];
   for (const format of formats) {
     if (settings.ai.noConsecutiveFormat !== false) {
       const tl = book.timeline[`${locationId}|${day}`] || [];
       const earlier = [...tl].filter((p) => p.time < time).sort((a, b) => b.time.localeCompare(a.time))[0];
       const later = [...tl].filter((p) => p.time > time).sort((a, b) => a.time.localeCompare(b.time))[0];
-      if (earlier?.format === format.name || later?.format === format.name) continue;
+      const fam = familyKey(format.name);
+      if ((earlier && familyKey(earlier.format) === fam) || (later && familyKey(later.format) === fam)) continue;
     }
     if (hasAdjacentSameFormat(book.timeline[`${locationId}|${day}`]?.map((p, i) => ({
       id: `${i}`,
@@ -529,13 +566,22 @@ function pickCandidate(
     } as Session)) ?? [], locationId, day, time, format.name)) continue;
     if (format.name === "Recovery" && !(book.timeline[`${locationId}|${day}`] || []).length) continue;
     const room = roomFor(locationId, format, book, day, time, settings);
-    if (!room) continue;
+    if (!room) {
+      if ((globalThis as any).DEBUG_ENGINE && (opts.names?.includes(format.name))) console.log("no-room", locationId, day, time, format.name);
+      continue;
+    }
     for (const trainer of trainers) {
-      if (canUseTrainer(trainer, locationId, day, time, format.duration, format, settings, book)) continue;
+      if (canUseTrainer(trainer, locationId, day, time, format.duration, format, settings, book, { relaxSoft: opts.relaxSoft })) {
+        if ((globalThis as any).DEBUG_ENGINE && (opts.names?.includes(format.name))) console.log("blocked", canUseTrainer(trainer, locationId, day, time, format.duration, format, settings, book, { relaxSoft: opts.relaxSoft }), locationId, day, time, format.name, trainer.id);
+        continue;
+      }
 	      if (hardRuleBlocks(settings, locationId, day, time, format.name, trainer.id)) continue;
 	      const h = historicForFast(locationId, day, time, format.name, trainer.id);
-	      if (hasPerformance() && h.sessions === 0) continue;
-	      if (!relaxed) {
+	      const zeroHistory = hasPerformance() && h.sessions === 0;
+	      // A slot/trainer combo with no history at all can only be used to fill out class-mix
+	      // variety or genuine experiments — gated by the caller's 15% quota (see opts.allowExperimental).
+	      if (zeroHistory && (!relaxed || !opts.allowExperimental)) continue;
+	      if (!relaxed && !zeroHistory) {
 	        if (hasPerformance() && h.sessions < 4) continue;
         if (h.checkin < settings.quality.checkinFloor || h.fill < settings.quality.fillFloor) continue;
 	      }
@@ -544,8 +590,8 @@ function pickCandidate(
 	      const newWorkingDay = !workedDays.includes(day);
 	      const weekOffPenalty = newWorkingDay && workedDays.length >= 5 ? 18 : 0;
 	      const score = applyOverrideBoost(scored.score, locationId, day, time, format.name, trainer.id) - weekOffPenalty;
-	      if (!relaxed && score < settings.quality.minAcceptScore) continue;
-      ranked.push({ format, trainer, room, score, h });
+	      if (!relaxed && !zeroHistory && score < settings.quality.minAcceptScore) continue;
+      ranked.push({ format, trainer, room, score, h, experimental: zeroHistory });
     }
   }
   const sh = shiftOf(time);
@@ -591,7 +637,7 @@ function tryAddSession(
   locationId: string,
   day: number,
   times: string[],
-  opts: { families?: string[]; names?: string[]; force?: boolean; tag?: Tag } = {}
+  opts: { families?: string[]; names?: string[]; force?: boolean; tag?: Tag; relaxSoft?: boolean } = {}
 ) {
   const shuffled = shuffle(times.filter((t) => allowedTime(day, t, settings)), rand);
   for (const time of shuffled) {
@@ -600,11 +646,15 @@ function tryAddSession(
       families: opts.families,
       names: opts.names,
       ignoreMixMax: opts.force,
+      allowExperimental: experimentalQuotaOk(sessions, locationId),
+      relaxSoft: opts.relaxSoft,
     });
     if (!pick) continue;
     if (sessions.some((s) => s.locationId === locationId && s.day === day && s.time === time && s.studio === pick.room)) continue;
     if (hasAdjacentSameFormat(sessions, locationId, day, time, pick.format.name)) continue;
-    const s = makeSession(locationId, day, time, pick.format, pick.trainer, pick.room, settings, opts.tag ? [opts.tag] : []);
+    const tags: Tag[] = opts.tag ? [opts.tag] : [];
+    if (pick.experimental) tags.push("experimental");
+    const s = makeSession(locationId, day, time, pick.format, pick.trainer, pick.room, settings, tags);
     sessions.push(s);
     commit(book, pick.trainer, locationId, day, time, pick.format.duration, pick.format.name, pick.room);
     return true;
@@ -671,7 +721,11 @@ function repairMixMinimums(sessions: Session[], book: Book, settings: Settings, 
       const current = countFormatFamily(sessions, loc.id, familyKey(name));
       let missing = Math.max(0, desired - current);
       let guard = 0;
-      while (missing > 0 && guard < 40) {
+      let failStreak = 0;
+      // A single all-days failure used to abandon the whole band fill; now we only give up
+      // after repeated consecutive misses (or the guard budget is exhausted), so a reshuffled
+      // day order gets more chances to land a slot for sparse-history formats like PowerCycle/Strength Lab.
+      while (missing > 0 && guard < 40 && failStreak < 10) {
         guard += 1;
         const dayOrder = shuffle([...DAYS].sort((a, b) => dayCount(sessions, loc.id, a.key) - dayCount(sessions, loc.id, b.key)), rand);
         let placed = false;
@@ -688,7 +742,11 @@ function repairMixMinimums(sessions: Session[], book: Book, settings: Settings, 
           }
           if (placed) break;
         }
-        if (!placed) break;
+        if (!placed) {
+          failStreak += 1;
+          continue;
+        }
+        failStreak = 0;
         added += 1;
         missing -= 1;
       }
@@ -716,6 +774,48 @@ function repairSaturdayPriority(sessions: Session[], book: Book, settings: Setti
   return added;
 }
 
+function repairDailyTargets(sessions: Session[], book: Book, settings: Settings, rand: () => number) {
+  let added = 0;
+  const dayOrder = [...DAYS].sort((a, b) => {
+    const weekendA = a.key >= 5 ? 1 : 0;
+    const weekendB = b.key >= 5 ? 1 : 0;
+    return weekendB - weekendA || a.key - b.key;
+  });
+  for (const loc of houses(settings)) {
+    for (const day of dayOrder) {
+      let current = dayCount(sessions, loc.id, day.key);
+      const target = targetCount(settings, loc.id, day.key);
+      let guard = 0;
+      while (current < target && guard < 12) {
+        guard += 1;
+        const ratio = shiftTarget(loc.id);
+        const list = locationDaySessions(sessions, loc.id, day.key);
+        const am = list.filter((s) => shiftOf(s.time) === "am").length;
+        const preferAm = list.length ? am / list.length < ratio : day.key >= 5;
+        const preferredTimes = day.key === 5
+          ? SATURDAY_AM_TIMES
+          : TIMES.filter((t) => shiftOf(t) === (preferAm ? "am" : "pm"));
+        const families = loc.id === "kwality"
+          ? ["Strength Lab", "PowerCycle", "Barre 57", "Mat 57", "FIT"]
+          : loc.roomTypes?.cycle
+            ? ["PowerCycle", "Barre 57", "Mat 57", "FIT"]
+            : ["Barre 57", "Mat 57", "FIT", "Cardio Barre"];
+        if (
+          !tryAddSession(sessions, book, settings, rand, loc.id, day.key, preferredTimes, { families, tag: "constraint" }) &&
+          !tryAddSession(sessions, book, settings, rand, loc.id, day.key, TIMES, { families, tag: "constraint" }) &&
+          !tryAddSession(sessions, book, settings, rand, loc.id, day.key, preferredTimes, { families, tag: "constraint", relaxSoft: true }) &&
+          !tryAddSession(sessions, book, settings, rand, loc.id, day.key, TIMES, { families, tag: "constraint", relaxSoft: true }) &&
+          !tryReplaceSession(sessions, settings, rand, loc.id, day.key, TIMES, { families, tag: "constraint" })
+        ) break;
+        book = rebuildBook(sessions, settings);
+        current = dayCount(sessions, loc.id, day.key);
+        added += 1;
+      }
+    }
+  }
+  return added;
+}
+
 function repairPeakParallelSlots(sessions: Session[], book: Book, settings: Settings, rand: () => number) {
   let added = 0;
   for (const loc of houses(settings).filter((l) => l.rooms.length > 1)) {
@@ -727,6 +827,30 @@ function repairPeakParallelSlots(sessions: Session[], book: Book, settings: Sett
         if (current >= target) continue;
         const families = loc.id === "kwality" ? ["Strength Lab", "PowerCycle", "Barre 57", "Mat 57", "FIT"] : loc.roomTypes?.cycle ? ["PowerCycle", "Barre 57", "Mat 57", "FIT"] : ["Barre 57", "Mat 57", "FIT", "Cardio Barre"];
         if (tryAddSession(sessions, book, settings, rand, loc.id, day.key, [time], { families, tag: "constraint" })) added += 1;
+      }
+    }
+  }
+  return added;
+}
+
+// Dedicated PowerCycle/Strength Lab rooms sit idle most of the day if left to the generic
+// candidate pool — actively try to book them during peak hours first so they run in parallel
+// alongside Barre/Mat/FIT rather than only picking up scraps of the schedule.
+function repairPeakSpecialtyRooms(sessions: Session[], book: Book, settings: Settings, rand: () => number) {
+  let added = 0;
+  for (const loc of houses(settings)) {
+    const specialtyFamilies: Array<{ family: string; names: string[] }> = [];
+    if (loc.roomTypes?.strength) specialtyFamilies.push({ family: "strength", names: ["Strength Lab"] });
+    if (loc.roomTypes?.cycle) specialtyFamilies.push({ family: "cycle", names: ["PowerCycle", "PowerCycle Express"] });
+    if (!specialtyFamilies.length) continue;
+    for (const day of DAYS) {
+      for (const { names } of specialtyFamilies) {
+        for (const time of shuffle(PEAK_TIMES, rand)) {
+          if (dayCount(sessions, loc.id, day.key) >= maxCount(settings, loc.id, day.key)) continue;
+          const already = sessions.some((s) => s.locationId === loc.id && s.day === day.key && s.time === time && names.includes(s.name));
+          if (already) continue;
+          if (tryAddSession(sessions, book, settings, rand, loc.id, day.key, [time], { names, tag: "constraint" })) added += 1;
+        }
       }
     }
   }
@@ -771,6 +895,10 @@ function repairCompliance(sessions: Session[], settings: Settings, rand: () => n
   book = rebuildBook(sessions, settings);
   changes += repairSaturdayPriority(sessions, book, settings, rand);
   book = rebuildBook(sessions, settings);
+  changes += repairDailyTargets(sessions, book, settings, rand);
+  book = rebuildBook(sessions, settings);
+  changes += repairPeakSpecialtyRooms(sessions, book, settings, rand);
+  book = rebuildBook(sessions, settings);
   changes += repairPeakParallelSlots(sessions, book, settings, rand);
   book = rebuildBook(sessions, settings);
   changes += repairShiftRatios(sessions, book, settings, rand);
@@ -786,7 +914,7 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean) {
     const format = catalog(settings).find((f) => f.name === pin.className);
     const trainer = roster(settings).find((t) => t.id === pin.trainerId);
     if (!format || !trainer) continue;
-    const room = roomFor(pin.locationId, format, book, pin.day, pin.time);
+    const room = roomFor(pin.locationId, format, book, pin.day, pin.time, settings);
     if (!room) continue;
     if (!allowedTime(pin.day, pin.time, settings)) continue;
     if (canUseTrainer(trainer, pin.locationId, pin.day, pin.time, format.duration, format, settings, book)) continue;
@@ -796,6 +924,32 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean) {
     commit(book, trainer, pin.locationId, pin.day, pin.time, format.duration, format.name, room);
   }
 
+  // Reserve PowerCycle/Strength Lab minimums before the generic greedy fill below, which otherwise
+  // exhausts the small pool of certified specialist trainers on Barre/Cardio/FIT first and leaves
+  // nothing for their own dedicated rooms.
+  for (const loc of houses(settings)) {
+    const specialtyNames: string[] = [];
+    if (loc.roomTypes?.strength) specialtyNames.push("Strength Lab");
+    if (loc.roomTypes?.cycle) specialtyNames.push("PowerCycle", "PowerCycle Express");
+    for (const name of specialtyNames) {
+      const band = settings.mix[loc.id]?.[familyKey(name)] ?? settings.mix[loc.id]?.[name];
+      const desired = loc.id === "kwality" && familyKey(name) === "Strength Lab" ? Math.max(band?.min ?? 0, 8) : band?.min ?? 0;
+      let guard = 0;
+      let failStreak = 0;
+      while (countFormatFamily(sessions, loc.id, familyKey(name)) < desired && guard < 40 && failStreak < 10) {
+        guard += 1;
+        const dayOrder = shuffle([...DAYS], rand);
+        let placed = false;
+        for (const day of dayOrder) {
+          if (dayCount(sessions, loc.id, day.key) >= maxCount(settings, loc.id, day.key)) continue;
+          placed = tryAddSession(sessions, book, settings, rand, loc.id, day.key, TIMES, { names: [name], tag: "constraint" });
+          if (placed) break;
+        }
+        failStreak = placed ? 0 : failStreak + 1;
+      }
+    }
+  }
+
   const order = houses(settings).map((h) => h.id);
   for (const locationId of order) {
     const loc = houses(settings).find((l) => l.id === locationId)!;
@@ -803,7 +957,7 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean) {
       const tgt = settings.targets[locationId]?.[day.key] ?? { target: 1, max: 2 };
       const wobble = Math.floor(rand() * 5) - 1;
       const sparseMin = settings.ai.fillSparseHouses !== false && locationId === "supreme" ? (day.key === 6 ? 5 : 8) : 1;
-      const want = Math.min(Math.max(optimize ? tgt.target : tgt.target + wobble, sparseMin, 1), tgt.max);
+      const want = Math.min(Math.max(optimize ? tgt.target : Math.max(tgt.target, tgt.target + wobble), sparseMin, 1), tgt.max);
       const cap = tgt.max;
       const times = shuffle(
         TIMES.filter((t) => allowedTime(day.key, t, settings)),
@@ -833,15 +987,20 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean) {
       ) {
         relaxedTries += 1;
         const time = times[(guard + relaxedTries) % times.length];
-        const pick = pickCandidate(locationId, day.key, time, settings, book, rand, true, 1, true);
+        const pick = pickCandidate(locationId, day.key, time, settings, book, rand, true, 1, true, {
+          allowExperimental: experimentalQuotaOk(sessions, locationId),
+        });
         if (!pick) continue;
         if (sessions.some((s) => s.locationId === locationId && s.day === day.key && s.time === time && s.studio === pick.room)) continue;
-        const s = makeSession(locationId, day.key, time, pick.format, pick.trainer, pick.room, settings, ["low", "constraint"]);
+        const tags: Tag[] = pick.experimental ? ["experimental"] : ["low", "constraint"];
+        const s = makeSession(locationId, day.key, time, pick.format, pick.trainer, pick.room, settings, tags);
         sessions.push(s);
         commit(book, pick.trainer, locationId, day.key, time, pick.format.duration, pick.format.name, pick.room);
       }
-      // optional fill toward max if high score leftover
-      if (optimize) {
+      // Fill toward max whenever a high-score leftover combo exists — runs on every
+      // generate, not just the explicit "Optimize" pass, so floors/mix targets land
+      // as close to max as evidence allows without needing a second manual click.
+      {
         let extra = 0;
         while (sessions.filter((s) => s.locationId === locationId && s.day === day.key).length < tgt.max && extra < 4) {
           extra += 1;
@@ -892,6 +1051,7 @@ function evaluate(sessions: Session[], settings: Settings, seed: number, trial: 
     DAYS.forEach((d) => {
       const n = list.filter((s) => s.day === d.key).length;
       const tgt = settings.targets[loc.id]?.[d.key];
+      if (tgt && n < Math.min(tgt.target, tgt.max)) violations.push(`${d.label} below target (${n}/${Math.min(tgt.target, tgt.max)})`);
       if (tgt && n > tgt.max) violations.push(`${d.label} over max (${n}/${tgt.max})`);
       if (d.key === 6 && list.some((s) => s.day === 6 && toMin(s.time) < toMin("10:00"))) violations.push("Sunday class before 10:00");
     });
@@ -930,9 +1090,12 @@ function fitness(report: GenReport, sessions: Session[], settings: Settings) {
   let saturdayPenalty = 0;
   let ratioPenalty = 0;
   let parallelPenalty = 0;
+  let targetPenalty = 0;
   for (const loc of LOCATIONS) {
     for (const day of DAYS) {
       const list = locationDaySessions(sessions, loc.id, day.key);
+      const target = targetCount(settings, loc.id, day.key);
+      if (list.length < target) targetPenalty += (target - list.length) * (day.key >= 5 ? 24 : 16);
       for (const family of ["Barre 57", "PowerCycle"]) {
         if (family === "PowerCycle" && !loc.roomTypes?.cycle) continue;
         for (const sh of ["am", "pm"] as const) {
@@ -960,7 +1123,7 @@ function fitness(report: GenReport, sessions: Session[], settings: Settings) {
       }
     }
   }
-  return avg * sessions.length * 0.15 - floorPenalty - viol - coveragePenalty - mixPenalty - saturdayPenalty - ratioPenalty - parallelPenalty;
+  return avg * sessions.length * 0.15 - floorPenalty - viol - coveragePenalty - mixPenalty - saturdayPenalty - ratioPenalty - parallelPenalty - targetPenalty;
 }
 
 // Local-search pass: after picking the best trial, try reassigning the weakest sessions to a
@@ -1007,6 +1170,9 @@ function refineSessions(sessions: Session[], book: Book, settings: Settings, ran
 }
 
 export function generateSchedule(settings: Settings, seed: number, optimize = false) {
+  if ((globalThis as any).DEBUG_ENGINE) {
+    console.log("gen-settings-locations", JSON.stringify(settings.locations?.find((l) => l.id === "kwality")));
+  }
   const trials = optimize || settings.ai.useAiPass ? 5 : 3;
   historicCache = new Map();
   try {

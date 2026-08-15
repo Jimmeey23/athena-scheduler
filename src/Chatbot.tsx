@@ -7,6 +7,7 @@ import { recordOverride } from "./overrides";
 
 type Msg = { role: "user" | "bot"; text: string };
 type Pending = { next: Session[]; reply: string };
+type AiReply = { reply: string; edits: RemoteEdit[] };
 
 export function Chatbot({
   all,
@@ -49,22 +50,52 @@ export function Chatbot({
     setInput("");
     setMsgs((m) => [...m, { role: "user", text }]);
     setBusy(true);
-    let applied = applyNaturalLanguage(text, all, settings, locationId);
     if (settings.ai.openaiKey) {
       try {
-        const remote = await askOpenAIEdits(text, all, settings.ai.openaiKey, settings.ai.openaiModel);
-        if (remote?.length) {
-          applied = applyEditList(remote, applied.next, settings);
+        const remote = await askOpenAI(text, msgs, all, settings);
+        if (remote.edits.length) {
+          const applied = applyEditList(remote.edits, all, settings, locationId);
+          setPending(applied);
+          setMsgs((m) => [
+            ...m,
+            { role: "bot", text: `${remote.reply}\n\n${applied.reply}\n\nPreview: ${diffSummary(applied.next)}. Apply this to the live week?` },
+          ]);
+        } else {
+          setPending(null);
+          setMsgs((m) => [...m, { role: "bot", text: remote.reply }]);
         }
-      } catch {
-        /* keep local result */
+        setBusy(false);
+        return;
+      } catch (err) {
+        const fallback = applyNaturalLanguage(text, all, settings, locationId);
+        const changed = diffSummary(fallback.next) !== "no changes";
+        if (changed) {
+          setPending(fallback);
+          setMsgs((m) => [...m, { role: "bot", text: `${fallback.reply}\n\nPreview: ${diffSummary(fallback.next)}. Apply this to the live week?` }]);
+        } else {
+          setPending(null);
+          setMsgs((m) => [...m, { role: "bot", text: `I could not reach OpenAI for a full answer. ${fallback.reply}` }]);
+        }
+        setBusy(false);
+        return;
       }
     }
-    setPending(applied);
-    setMsgs((m) => [
-      ...m,
-      { role: "bot", text: `${applied.reply}\n\nPreview: ${diffSummary(applied.next)}. Apply this to the live week?` },
-    ]);
+
+    const applied = applyNaturalLanguage(text, all, settings, locationId);
+    const changed = diffSummary(applied.next) !== "no changes";
+    if (changed) {
+      setPending(applied);
+      setMsgs((m) => [...m, { role: "bot", text: `${applied.reply}\n\nPreview: ${diffSummary(applied.next)}. Apply this to the live week?` }]);
+    } else {
+      setPending(null);
+      setMsgs((m) => [
+        ...m,
+        {
+          role: "bot",
+          text: "OpenAI is not configured for this app session, so I can only use the local schedule-edit parser. Add `VITE_OPENAI_API_KEY` to enable full general Q&A and richer schedule instructions.",
+        },
+      ]);
+    }
     setBusy(false);
   }
 
@@ -90,7 +121,7 @@ export function Chatbot({
           <div className="flex items-center justify-between border-b border-line px-4 py-3">
             <div>
               <p className="text-sm font-medium">Athena assistant</p>
-              <p className="text-[11px] text-mist">Previews edits before writing to the live calendar</p>
+              <p className="text-[11px] text-mist">OpenAI answers questions and previews calendar edits</p>
             </div>
             <button onClick={() => setOpen(false)}>
               <X className="h-4 w-4" />
@@ -115,7 +146,7 @@ export function Chatbot({
             )}
           </div>
           <div className="flex gap-2 border-t border-line p-3">
-            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder="Add, remove, swap…" className="flex-1 rounded-xl border border-line bg-ink px-3 py-2 text-sm outline-none" />
+            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder="Ask anything, or edit the schedule…" className="flex-1 rounded-xl border border-line bg-ink px-3 py-2 text-sm outline-none" />
             <button onClick={send} className="rounded-xl bg-[#005eed] px-3 text-white">
               <Send className="h-4 w-4" />
             </button>
@@ -246,52 +277,140 @@ export function applyNaturalLanguage(raw: string, all: Session[], settings: Sett
   return { next, reply: "I need a house and a day, e.g. “add 3 classes at Kwality on Saturday” or “remove Friday 19:00 FIT”." };
 }
 
-type RemoteEdit = { action: "add" | "remove" | "swap"; location?: string; day?: string; time?: string; className?: string; trainer?: string; newTrainer?: string };
+type RemoteEdit = {
+  action: "add" | "create" | "remove" | "delete" | "swap" | "reschedule" | "modify";
+  location?: string;
+  day?: string;
+  time?: string;
+  className?: string;
+  trainer?: string;
+  newTrainer?: string;
+  newDay?: string;
+  newTime?: string;
+  newLocation?: string;
+  newClassName?: string;
+};
 
-function applyEditList(edits: RemoteEdit[], all: Session[], settings: Settings) {
+function applyEditList(edits: RemoteEdit[], all: Session[], settings: Settings, fallbackLoc: string) {
   let next = [...all];
   const notes: string[] = [];
   for (const e of edits) {
-    const loc = findLoc((e.location || "").toLowerCase()) || "kwality";
+    const loc = findLoc((e.location || "").toLowerCase()) || fallbackLoc;
     const day = findDay((e.day || "").toLowerCase());
     const time = e.time ? findTime(e.time) : null;
-    if (e.action === "remove" && day != null) {
+    const format = findFormat((e.className || "").toLowerCase());
+    const trainer = findTrainer((e.trainer || "").toLowerCase());
+    const matches = (s: Session) =>
+      s.locationId === loc &&
+      (day == null || s.day === day) &&
+      (!time || s.time === time) &&
+      (!format || s.name === format.name) &&
+      (!trainer || s.trainerId === trainer.id);
+
+    if ((e.action === "remove" || e.action === "delete") && (day != null || time || format || trainer)) {
       const before = next.length;
-      next = next.filter((s) => !(s.locationId === loc && s.day === day && (!time || s.time === time)));
+      next = next.filter((s) => !matches(s));
       notes.push(`removed ${before - next.length}`);
     }
-    if (e.action === "add" && day != null && time) {
-      const format = FORMATS.find((f) => f.name.toLowerCase() === (e.className || "").toLowerCase()) || FORMATS[0];
-      const who = TRAINERS.find((t) => t.name.toLowerCase() === (e.trainer || "").toLowerCase()) || TRAINERS[0];
+    if ((e.action === "add" || e.action === "create") && day != null && time) {
+      const format = findFormat((e.className || "").toLowerCase()) || FORMATS[0];
+      const who = findTrainer((e.trainer || "").toLowerCase()) || eligibleTrainer(format, loc, day, settings);
+      if (!who) {
+        notes.push(`could not add ${format.name}: no eligible trainer`);
+        continue;
+      }
       next.push(buildSession(loc, day, time, format, who, settings));
-      notes.push(`added ${format.name}`);
+      notes.push(`added ${format.name} on ${DAYS[day].label} ${time}`);
+    }
+    if (e.action === "swap") {
+      const to = findTrainer((e.newTrainer || "").toLowerCase());
+      if (!to) {
+        notes.push("could not swap: new trainer not found");
+        continue;
+      }
+      let n = 0;
+      next = next.map((s) => {
+        if (!matches(s)) return s;
+        n += 1;
+        recordOverride(s.locationId, s.day, s.time, s.name, s.trainerId, to.id);
+        return { ...s, trainerId: to.id, reason: `Chat swap: ${trainerById(s.trainerId).name} → ${to.name}` };
+      });
+      notes.push(`swapped trainer on ${n} slot${n === 1 ? "" : "s"}`);
+    }
+    if (e.action === "reschedule" || e.action === "modify") {
+      const newDay = e.newDay ? findDay(e.newDay.toLowerCase()) : null;
+      const newTime = e.newTime ? findTime(e.newTime) : null;
+      const newLoc = e.newLocation ? findLoc(e.newLocation.toLowerCase()) : null;
+      const newFormat = e.newClassName ? findFormat(e.newClassName.toLowerCase()) : null;
+      const newTrainer = e.newTrainer ? findTrainer(e.newTrainer.toLowerCase()) : null;
+      let n = 0;
+      next = next.map((s) => {
+        if (!matches(s)) return s;
+        n += 1;
+        const format = newFormat || FORMATS.find((f) => f.name === s.name) || FORMATS[0];
+        const trainer = newTrainer || trainerById(s.trainerId);
+        const moved = buildSession(newLoc || s.locationId, newDay ?? s.day, newTime || s.time, format, trainer, settings);
+        return { ...moved, id: s.id, pinned: s.pinned, reason: "Chat reschedule/edit preview." };
+      });
+      notes.push(`updated ${n} slot${n === 1 ? "" : "s"}`);
     }
   }
-  return { next, reply: notes.length ? `Applied ${notes.length} live edit(s): ${notes.join(", ")}.` : "No structured edits returned." };
+  return { next, reply: notes.length ? `Prepared ${notes.length} edit step(s): ${notes.join(", ")}.` : "No structured edits were actionable." };
 }
 
-async function askOpenAIEdits(prompt: string, all: Session[], key: string, model: string): Promise<RemoteEdit[] | null> {
-  const snap = all.slice(0, 80).map((s) => `${DAYS[s.day].full} ${s.time} ${s.locationId} ${s.name} ${trainerById(s.trainerId).name}`).join("\n");
+function eligibleTrainer(format: (typeof FORMATS)[number], loc: string, day: number, settings: Settings) {
+  const roster = settings.trainers?.length ? settings.trainers : TRAINERS;
+  return roster.find((t) => t.active && t.certs[format.cert] && t.access[loc]?.days.includes(day) && !t.access[loc]?.weekOff.includes(day));
+}
+
+async function askOpenAI(prompt: string, history: Msg[], all: Session[], settings: Settings): Promise<AiReply> {
+  const snap = all
+    .slice(0, 220)
+    .map((s) => `${s.id} | ${DAYS[s.day].full} ${s.time} | ${s.locationId} | ${s.studio} | ${s.name} | ${trainerById(s.trainerId).name} | avg ${s.avg} | fill ${s.fill}% | sessions ${s.sessions}`)
+    .join("\n");
+  const key = settings.ai.openaiKey;
+  const model = settings.ai.openaiModel || "gpt-4.1-mini";
+  const recent = history.slice(-8).map((m) => ({ role: m.role === "bot" ? "assistant" : "user", content: m.text }));
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({
-      model: model || "gpt-4.1-mini",
+      model,
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            'Return ONLY JSON: {"edits":[{"action":"add|remove|swap","location":"kwality","day":"Saturday","time":"10:15","className":"Barre 57","trainer":"Anisha Shah"}]}. Use existing class names. Never invent Hosted, Foundations, or SWEAT In 30.',
+            `You are Athena, an OpenAI-powered assistant inside a scheduling app. Answer any question the user asks, including questions outside Physique 57, in a clear, accurate, detailed, well-written manner. If current real-world facts may have changed, say you may need live verification because this app chat has no browser access.
+
+For schedule edits, return JSON only with:
+{"reply":"well-written user-facing answer","edits":[...]}
+
+Supported edit actions:
+- add/create: location, day, time, className, optional trainer
+- remove/delete: identify by location/day/time/className/trainer as available
+- swap: identify slot(s) with location/day/time/className/trainer and provide newTrainer
+- reschedule/modify: identify slot(s), then provide newDay/newTime/newLocation/newClassName/newTrainer as needed
+
+Use only these location ids/names: ${LOCATIONS.map((l) => `${l.id} (${l.name})`).join(", ")}.
+Use only these class names: ${FORMATS.map((f) => f.name).join(", ")}.
+Use only these trainers: ${TRAINERS.map((t) => t.name).join(", ")}.
+Never create Hosted, Foundations, or SWEAT In 30.
+If the user asks a question only, return edits: [].
+If an edit is ambiguous, ask a clarifying question in reply and return edits: [].
+Do not say an edit is applied; say it is prepared for preview.`,
         },
-        { role: "user", content: `LIVE WEEK:\n${snap}\n\nINSTRUCTION: ${prompt}` },
+        ...recent,
+        { role: "user", content: `LIVE WEEK SNAPSHOT:\n${snap}\n\nUSER REQUEST:\n${prompt}` },
       ],
     }),
   });
-  if (!res.ok) return null;
+  if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
   const raw = data.choices?.[0]?.message?.content || "";
-  const m = raw.match(/\{[\s\S]*\}/);
-  if (!m) return null;
-  const parsed = JSON.parse(m[0]);
-  return parsed.edits || null;
+  const parsed = JSON.parse(raw);
+  return {
+    reply: String(parsed.reply || "I can help with that."),
+    edits: Array.isArray(parsed.edits) ? parsed.edits : [],
+  };
 }

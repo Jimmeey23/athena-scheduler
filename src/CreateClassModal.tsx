@@ -114,7 +114,7 @@ export function CreateClassModal({
             <select value={formatName} onChange={(e) => setFormatName(e.target.value)} className="mt-1 w-full rounded-xl border border-line bg-ink px-3 py-2 text-sm text-ivory">
               {formats.map((f) => (
                 <option key={f.name} value={f.name}>
-                  {f.name} \u00b7 n={countFor(f)} today at this house
+                  {f.name} · n={countFor(f)} today at this house
                 </option>
               ))}
             </select>

@@ -174,11 +174,29 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(KEY);
     if (!raw) return structuredClone(DEFAULT_SETTINGS);
     const parsed = JSON.parse(raw) as Settings;
+    // Merge per-format band, keeping the higher of saved/default min so a stale saved band
+    // (e.g. Kwality's Strength Lab min was raised from 2-4 to 8-12 in code) never permanently
+    // shadows a later, larger default. Max follows the saved value when present.
+    const mixedMix: Settings["mix"] = { ...DEFAULT_SETTINGS.mix };
+    for (const locId of Object.keys(mixedMix)) {
+      const savedLoc = parsed.mix?.[locId] ?? {};
+      const merged = { ...mixedMix[locId] };
+      for (const [name, savedBand] of Object.entries(savedLoc)) {
+        const defBand = merged[name];
+        merged[name] = defBand
+          ? { min: Math.max(defBand.min, savedBand.min), max: Math.max(defBand.max, savedBand.max, savedBand.min) }
+          : savedBand;
+      }
+      mixedMix[locId] = merged;
+    }
+    for (const locId of Object.keys(parsed.mix ?? {})) {
+      if (!(locId in mixedMix)) mixedMix[locId] = parsed.mix![locId];
+    }
     return {
       ...structuredClone(DEFAULT_SETTINGS),
       ...parsed,
       targets: { ...DEFAULT_SETTINGS.targets, ...parsed.targets },
-      mix: { ...DEFAULT_SETTINGS.mix, ...parsed.mix },
+      mix: mixedMix,
       ai: { ...DEFAULT_SETTINGS.ai, ...parsed.ai },
       quality: { ...DEFAULT_SETTINGS.quality, ...parsed.quality },
       limits: { ...DEFAULT_SETTINGS.limits, ...parsed.limits },
