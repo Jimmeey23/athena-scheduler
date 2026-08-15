@@ -1169,10 +1169,16 @@ function refineSessions(sessions: Session[], book: Book, settings: Settings, ran
   return swaps;
 }
 
-export function generateSchedule(settings: Settings, seed: number, optimize = false) {
+// locationIds, when given, scopes generation to just those houses — every internal pass reads
+// its location list through houses(settings), so swapping settings.locations to the subset is
+// enough; callers merge the returned sessions back with their untouched other-location sessions.
+export function generateSchedule(settings: Settings, seed: number, optimize = false, locationIds?: string[]) {
   if ((globalThis as any).DEBUG_ENGINE) {
     console.log("gen-settings-locations", JSON.stringify(settings.locations?.find((l) => l.id === "kwality")));
   }
+  const scoped: Settings = locationIds?.length
+    ? { ...settings, locations: houses(settings).filter((l) => locationIds.includes(l.id)) }
+    : settings;
   const trials = optimize || settings.ai.useAiPass ? 5 : 3;
   historicCache = new Map();
   try {
@@ -1181,8 +1187,8 @@ export function generateSchedule(settings: Settings, seed: number, optimize = fa
     let bestFit = -Infinity;
     let picked = 0;
     for (let i = 0; i < trials; i++) {
-      const out = generateOnce(settings, seed + i * 9973, optimize);
-      const repaired = repairCompliance(out.sessions, settings, rng(seed + i * 9973 + 313));
+      const out = generateOnce(scoped, seed + i * 9973, optimize);
+      const repaired = repairCompliance(out.sessions, scoped, rng(seed + i * 9973 + 313));
       out.book = repaired.book;
       const report = evaluate(out.sessions, settings, seed, i + 1, trials);
       const fit = fitness(report, out.sessions, settings);
@@ -1196,7 +1202,7 @@ export function generateSchedule(settings: Settings, seed: number, optimize = fa
     const sessions = best?.sessions ?? [];
     if (best) {
       refineSessions(sessions, best.book, settings, rng(seed + 777));
-      best.book = repairCompliance(sessions, settings, rng(seed + 991)).book;
+      best.book = repairCompliance(sessions, scoped, rng(seed + 991)).book;
     }
     const report = bestReport
       ? { ...evaluate(sessions, settings, seed, picked, trials), pickedTrial: picked }

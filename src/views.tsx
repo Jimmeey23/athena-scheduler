@@ -187,51 +187,129 @@ export function ListView({ sessions, pinned, onSelect }: { sessions: Session[]; 
   );
 }
 
+const TIER_TONE: Record<number, string> = {
+  1: "bg-[#005eed] text-white",
+  2: "bg-[#0e1729] text-white",
+  3: "bg-mist/30 text-ivory",
+  4: "bg-mist/20 text-mist",
+};
+
 export function TrainerView({ sessions, onSelect }: { sessions: Session[]; onSelect: (s: Session) => void }) {
   const people = trainerLoad(sessions);
   return (
-    <div className="space-y-6 overflow-auto pb-8">
-      {people.map((t) => (
-        <Panel key={t.id} className="overflow-x-auto p-4">
-          <div className="mb-3 flex items-center gap-3">
-            <img src={t.photo} alt="" className="h-12 w-12 rounded-2xl object-cover" />
-            <div>
-              <p className="font-medium">{t.name}</p>
-              <p className="text-xs text-mist">
-                T{t.tier} · {t.hours}h · {t.classes} classes
-              </p>
+    <div className="grid gap-5 overflow-auto pb-8 xl:grid-cols-2">
+      {people.map((t) => {
+        const mine = sessions.filter((s) => s.trainerId === t.id);
+        const locCount = new Set(mine.map((s) => s.locationId)).size;
+        const avgFill = mine.length ? Math.round(mine.reduce((a, s) => a + s.fill, 0) / mine.length) : 0;
+        // Reference weekly-hour cap for the load bar — the real per-org cap lives in settings.limits,
+        // not passed down to this view; 15h is the app-wide default weeklyCap.
+        const utilization = Math.min(100, Math.round((t.hours / 15) * 100));
+        const byFamily = new Map<string, { count: number; accent: string }>();
+        for (const s of mine) {
+          const row = byFamily.get(s.name) ?? { count: 0, accent: s.accent };
+          row.count += 1;
+          byFamily.set(s.name, row);
+        }
+        const mix = [...byFamily.entries()].sort((a, b) => b[1].count - a[1].count);
+        return (
+          <Panel key={t.id} className="overflow-hidden p-0">
+            <div className="flex items-center gap-4 bg-gradient-to-br from-[#0e1729] to-[#1c2c4a] p-5 text-white">
+              <img src={t.photo} alt="" className="h-16 w-16 rounded-2xl object-cover ring-2 ring-white/20" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="truncate text-lg font-semibold">{t.name}</p>
+                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${TIER_TONE[t.tier] ?? TIER_TONE[4]}`}>T{t.tier}</span>
+                </div>
+                <p className="mt-0.5 truncate text-[11px] text-white/60">{t.specialty}</p>
+              </div>
             </div>
-          </div>
-          <table className="w-full min-w-[720px] text-left text-xs">
-            <thead>
-              <tr className="uppercase text-mist">
-                <th className="py-2">Day</th>
-                {LOCATIONS.map((l) => (
-                  <th key={l.id}>{l.name}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {DAYS.map((d) => (
-                <tr key={d.key} className="border-t border-line align-top">
-                  <td className="py-2 font-medium">{d.label}</td>
-                  {LOCATIONS.map((l) => (
-                    <td key={l.id} className="py-2">
-                      {sessions
-                        .filter((s) => s.trainerId === t.id && s.day === d.key && s.locationId === l.id)
-                        .map((s) => (
-                          <button key={s.id} onClick={() => onSelect(s)} className="mb-1 block rounded-lg bg-ink px-2 py-1">
-                            {s.time} {s.name}
-                          </button>
-                        ))}
-                    </td>
-                  ))}
-                </tr>
+            <div className="grid grid-cols-4 gap-px bg-line">
+              {[
+                { label: "Classes", value: String(t.classes) },
+                { label: "Hours", value: `${t.hours}h` },
+                { label: "Avg fill", value: `${avgFill}%` },
+                { label: "Houses", value: String(locCount) },
+              ].map((stat) => (
+                <div key={stat.label} className="bg-white p-3 text-center">
+                  <p className="text-lg font-semibold tabular-nums text-[#0e1729]">{stat.value}</p>
+                  <p className="text-[9px] uppercase tracking-wider text-mist">{stat.label}</p>
+                </div>
               ))}
-            </tbody>
-          </table>
-        </Panel>
-      ))}
+            </div>
+            <div className="p-4">
+              <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-mist">
+                <span>Week load</span>
+                <span>{utilization}%</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-ink">
+                <div
+                  className="h-full rounded-full"
+                  style={{ width: `${utilization}%`, background: utilization > 90 ? "#e05a3c" : "#005eed" }}
+                />
+              </div>
+              {mix.length > 0 && (
+                <>
+                  <div className="mt-3 flex h-2 overflow-hidden rounded-full">
+                    {mix.map(([name, row]) => (
+                      <div key={name} title={`${name} · ${row.count}`} style={{ width: `${(row.count / t.classes) * 100}%`, background: row.accent }} />
+                    ))}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-mist">
+                    {mix.map(([name, row]) => (
+                      <span key={name} className="inline-flex items-center gap-1">
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ background: row.accent }} />
+                        {name} · {row.count}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="overflow-x-auto border-t border-line p-4">
+              <table className="w-full min-w-[560px] text-left text-xs">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wider text-mist">
+                    <th className="w-10 py-1">Day</th>
+                    {LOCATIONS.map((l) => (
+                      <th key={l.id} className="py-1">
+                        {l.name.split(" ")[0]}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {DAYS.map((d) => (
+                    <tr key={d.key} className="border-t border-line align-top">
+                      <td className="py-1.5 font-medium text-mist">{d.label}</td>
+                      {LOCATIONS.map((l) => (
+                        <td key={l.id} className="py-1.5 pr-2">
+                          <div className="flex flex-col gap-1">
+                            {sessions
+                              .filter((s) => s.trainerId === t.id && s.day === d.key && s.locationId === l.id)
+                              .map((s) => (
+                                <button
+                                  key={s.id}
+                                  onClick={() => onSelect(s)}
+                                  className="flex items-center gap-1.5 rounded-lg bg-ink px-2 py-1 text-left text-[11px] hover:bg-[#005eed]/10"
+                                >
+                                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: s.accent }} />
+                                  <span className="truncate">
+                                    {s.time} {s.name}
+                                  </span>
+                                </button>
+                              ))}
+                          </div>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+        );
+      })}
     </div>
   );
 }

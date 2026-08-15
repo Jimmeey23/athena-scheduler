@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Building2,
-  CalendarDays,
   DoorOpen,
   FileText,
   Flame,
@@ -31,9 +30,9 @@ import {
   trainerById,
   trainerLoad,
 } from "./data";
-import type { Session, Settings, ViewId } from "./types";
-import { topTrainersFor } from "./ui";
-import { generateSchedule, hasConflict, historicFor, refreshSessionMetrics, scoreCombo, slotHistory } from "./engine";
+import type { Pin, Session, Settings, ViewId } from "./types";
+import { Dropdown, MultiSelect, topTrainersFor } from "./ui";
+import { complianceFor, generateSchedule, hasConflict, historicFor, refreshSessionMetrics, scoreCombo, slotHistory } from "./engine";
 import { FORMATS } from "./data";
 import { loadSettings, saveSettings } from "./settings";
 import { loadCurrentSchedule, loadDrafts, pushDraft, saveCurrentSchedule } from "./drafts";
@@ -110,7 +109,6 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [focusTrainer, setFocusTrainer] = useState<string | null>(null);
-  const [pinned, setPinned] = useState<string[]>([]);
   const [reassigned, setReassigned] = useState<Record<string, string>>({});
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [weekStart, setWeekStart] = useState<Date>(() => mondayOf(new Date()));
@@ -134,6 +132,15 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [kpiKey, setKpiKey] = useState<string | null>(null);
   const [perfCount, setPerfCount] = useState(0);
+  const [genLocationIds, setGenLocationIds] = useState<string[]>(LOCATIONS.map((l) => l.id));
+  const [genSummary, setGenSummary] = useState<null | {
+    total: number;
+    ai: number;
+    pinned: number;
+    variety: number;
+    byFormat: Array<[string, number]>;
+    byTrainer: Array<[string, number]>;
+  }>(null);
 
   useEffect(() => {
     // Loads historic performance data only — must not silently reshuffle the displayed schedule.
@@ -195,6 +202,7 @@ export default function App() {
   }, []);
 
   const location = locationById(locationId);
+  const pinned = useMemo(() => bundle.sessions.filter((s) => s.pinned).map((s) => s.id), [bundle.sessions]);
   const all = useMemo(
     () => applySchedule(bundle.sessions, { pinned, reassigned, optimized: false }),
     [bundle.sessions, pinned, reassigned]
@@ -222,8 +230,14 @@ export default function App() {
       if (i >= AI_STEPS.length) {
         clearInterval(timer);
         const seed = (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0;
+        const scoped = genLocationIds.length && genLocationIds.length < LOCATIONS.length ? genLocationIds : undefined;
         try {
-          const next = generateSchedule(settings, seed, kind === "optimize");
+          const generated = generateSchedule(settings, seed, kind === "optimize", scoped);
+          const sessions = scoped
+            ? [...bundle.sessions.filter((s) => !scoped.includes(s.locationId)), ...generated.sessions]
+            : generated.sessions;
+          const report = scoped ? complianceFor(sessions, settings) : generated.report;
+          const next = { sessions, report };
           setBundle(next);
           saveCurrentSchedule(next);
           persistSchedule(next);
@@ -231,19 +245,38 @@ export default function App() {
           setDrafts(saved);
           persistCloud({ settings, drafts: saved, sessions: next.sessions });
           const aiOn = Boolean(ENV.openaiKey);
+          const scopeLabel = scoped ? ` for ${scoped.map((id) => locationById(id).name).join(", ")}` : "";
           setToast(
             aiOn
-              ? `AI draft ${next.report.hash} · ${next.sessions.length} classes`
-              : `Rules-based draft ${next.report.hash} · ${next.sessions.length} classes — OpenAI is not configured in .env`
+              ? `AI draft ${next.report.hash} · ${generated.sessions.length} classes${scopeLabel}`
+              : `Rules-based draft ${next.report.hash} · ${generated.sessions.length} classes${scopeLabel} — OpenAI is not configured in .env`
           );
+          const roster = settings.trainers?.length ? settings.trainers : TRAINERS;
+          const pinnedCount = generated.sessions.filter((s) => s.tags.includes("protected")).length;
+          const varietyCount = generated.sessions.filter(
+            (s) => !s.tags.includes("protected") && (s.tags.includes("mix") || s.tags.includes("experimental") || s.tags.includes("constraint"))
+          ).length;
+          const byFormat: Record<string, number> = {};
+          const byTrainer: Record<string, number> = {};
+          for (const s of generated.sessions) {
+            byFormat[s.name] = (byFormat[s.name] ?? 0) + 1;
+            const trainerName = roster.find((t) => t.id === s.trainerId)?.name ?? s.trainerId;
+            byTrainer[trainerName] = (byTrainer[trainerName] ?? 0) + 1;
+          }
+          setGenSummary({
+            total: generated.sessions.length,
+            pinned: pinnedCount,
+            variety: varietyCount,
+            ai: generated.sessions.length - pinnedCount - varietyCount,
+            byFormat: Object.entries(byFormat).sort((a, b) => b[1] - a[1]),
+            byTrainer: Object.entries(byTrainer).sort((a, b) => b[1] - a[1]),
+          });
         } catch {
           setToast("Generation failed — check settings and try again");
+          setAiOpen(false);
         }
         setReassigned({});
-        setTimeout(() => {
-          setAiOpen(false);
-          setTimeout(() => setToast(null), 2400);
-        }, 400);
+        setTimeout(() => setToast(null), 2400);
       }
     }, 10000);
   }
@@ -283,6 +316,31 @@ export default function App() {
       setTimeout(() => setToast(null), 2200);
     },
     onSimilar: (s: Session) => setSimilarFor(s),
+    onTogglePin: (s: Session) => {
+      const existingPin = settings.pins.find(
+        (p) => p.locationId === s.locationId && p.day === s.day && p.time === s.time && p.className === s.name && p.trainerId === s.trainerId
+      );
+      if (s.pinned || existingPin) {
+        persistSettings({ ...settings, pins: settings.pins.filter((p) => p.id !== existingPin?.id) });
+        setSessions(bundle.sessions.map((x) => (x.id === s.id ? { ...x, pinned: false, tags: x.tags.filter((t) => t !== "protected") } : x)));
+        setToast(`Unpinned ${s.name} — future generations may replace it`);
+      } else {
+        const pin: Pin = {
+          id: `pin-${Date.now()}`,
+          locationId: s.locationId,
+          day: s.day,
+          time: s.time,
+          className: s.name,
+          trainerId: s.trainerId,
+          note: "Pinned from schedule",
+          enabled: true,
+        };
+        persistSettings({ ...settings, pins: [...settings.pins, pin] });
+        setSessions(bundle.sessions.map((x) => (x.id === s.id ? { ...x, pinned: true, tags: [...new Set([...x.tags, "protected" as const])] } : x)));
+        setToast(`Pinned ${s.name} — protected from future regenerations`);
+      }
+      setTimeout(() => setToast(null), 2200);
+    },
   };
 
   function addFromHistoric(opt: { day: number; time: string; name: string; trainerId: string }) {
@@ -407,65 +465,66 @@ export default function App() {
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex flex-wrap items-center gap-3 border-b border-line bg-white px-4 py-3 lg:px-6">
+          <header className="hide-scroll relative z-20 flex flex-nowrap items-center gap-3 overflow-x-auto border-b border-line bg-white px-4 py-3 lg:px-6">
             <button
-              className="rounded-xl p-2 text-mist ring-1 ring-line lg:hidden"
+              className="shrink-0 rounded-xl p-2 text-mist ring-1 ring-line lg:hidden"
               onClick={() => setRailOpen((o) => !o)}
             >
               <LayoutGrid className="h-4 w-4" />
             </button>
-            <div className="min-w-[180px]">
+            <div className="min-w-[180px] shrink-0">
               <p className="font-serif text-[28px] leading-none tracking-tight text-ivory">
                 Athena <span className="italic text-gold">Scheduler</span>
               </p>
               <p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-mist">AI class schedule intelligence</p>
             </div>
-            <div className="relative min-w-[200px] flex-1">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-mist" />
+            <div className="relative w-40 shrink-0">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-mist" />
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search class, trainer, studio…"
-                className="w-full rounded-2xl border border-line bg-[#efefef] py-2.5 pl-10 pr-3 text-sm outline-none placeholder:text-mist/70 focus:border-[#005eed]"
+                placeholder="Search…"
+                className="w-full rounded-xl border border-line bg-[#efefef] py-2 pl-8 pr-2 text-xs outline-none placeholder:text-mist/70 focus:border-[#005eed]"
               />
             </div>
-            <div className="flex items-center gap-2 text-xs text-mist">
-              <span className="hidden items-center gap-1.5 rounded-full bg-white px-3 py-1.5 ring-1 ring-line sm:inline-flex">
-                <span className="live-dot h-1.5 w-1.5 rounded-full bg-gold" />
-                Working solo
-              </span>
-              <div className="relative">
-                <button
-                  onClick={() => setWeekPickerOpen((o) => !o)}
-                  className="hidden items-center gap-1.5 rounded-full bg-white px-3 py-1.5 ring-1 ring-line hover:ring-[#005eed]/40 md:inline-flex"
-                >
-                  <Sun className="h-3.5 w-3.5 text-gold" />
-                  Week of {fmtShort(weekStart)} – {fmtShort(new Date(weekStart.getTime() + 6 * 86400000))}
-                </button>
-                {weekPickerOpen && (
-                  <div className="absolute right-0 top-full z-40 mt-2 rounded-2xl border border-line bg-white p-3 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-                    <p className="mb-2 text-[10px] uppercase tracking-wider text-mist">Pick any date in the week</p>
-                    <input
-                      type="date"
-                      value={isoDate(weekStart)}
-                      onChange={(e) => {
-                        if (!e.target.value) return;
-                        setWeekStart(mondayOf(new Date(e.target.value)));
-                        setWeekPickerOpen(false);
-                      }}
-                      className="rounded-xl border border-line px-3 py-2 text-sm"
-                    />
-                  </div>
-                )}
-              </div>
-              <span className="hidden items-center gap-1.5 rounded-full bg-white px-3 py-1.5 ring-1 ring-line xl:inline-flex">
-                <CalendarDays className="h-3.5 w-3.5" />
-                {isoDate(weekStart)}
-              </span>
+            <div className="relative shrink-0">
+              <button
+                onClick={() => setWeekPickerOpen((o) => !o)}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-white px-3 py-1.5 text-xs text-mist ring-1 ring-line hover:ring-[#005eed]/40"
+              >
+                <Sun className="h-3.5 w-3.5 text-gold" />
+                Week of {fmtShort(weekStart)} – {fmtShort(new Date(weekStart.getTime() + 6 * 86400000))}
+              </button>
+              {weekPickerOpen && (
+                <div className="absolute right-0 top-full z-40 mt-2 rounded-2xl border border-line bg-white p-3 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                  <p className="mb-2 text-[10px] uppercase tracking-wider text-mist">Pick any date in the week</p>
+                  <input
+                    type="date"
+                    value={isoDate(weekStart)}
+                    onChange={(e) => {
+                      if (!e.target.value) return;
+                      setWeekStart(mondayOf(new Date(e.target.value)));
+                      setWeekPickerOpen(false);
+                    }}
+                    className="rounded-xl border border-line px-3 py-2 text-sm"
+                  />
+                </div>
+              )}
             </div>
-            <div className="flex flex-wrap gap-2">
-              <div className="relative">
-                <button onClick={() => setExportOpen((o) => !o)} className="rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory">
+            <select
+              value={locationId}
+              onChange={(e) => setLocationId(e.target.value)}
+              className="shrink-0 rounded-xl bg-white px-3 py-2 text-xs text-ivory ring-1 ring-line hover:text-mist"
+            >
+              {LOCATIONS.map((loc) => (
+                <option key={loc.id} value={loc.id}>
+                  {loc.name} · {all.filter((s) => s.locationId === loc.id).length}
+                </option>
+              ))}
+            </select>
+            <div className="flex shrink-0 flex-nowrap gap-2">
+              <div className="relative shrink-0">
+                <button onClick={() => setExportOpen((o) => !o)} className="whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory">
                   Export
                 </button>
                 {exportOpen && (
@@ -497,20 +556,27 @@ export default function App() {
                   setToast(ok ? `Finalized schedule saved for week of ${fmtShort(weekStart)}` : "Could not save to Supabase — check connection");
                   setTimeout(() => setToast(null), 2600);
                 }}
-                className="rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory"
+                className="shrink-0 whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory"
               >
                 Finalize schedule
               </button>
+              <MultiSelect
+                className="w-32 shrink-0"
+                options={LOCATIONS.map((l) => ({ value: l.id, label: l.name }))}
+                selected={genLocationIds}
+                onChange={setGenLocationIds}
+                placeholder="All locations"
+              />
               <button
                 onClick={() => runAi("generate")}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#0e1729] px-3 py-2 text-xs font-semibold text-white"
+                className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl bg-[#0e1729] px-3 py-2 text-xs font-semibold text-white"
               >
                 <Sparkles className="h-3.5 w-3.5" />
                 Generate with AI
               </button>
               <button
                 onClick={() => runAi("optimize")}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#005eed] px-3 py-2 text-xs font-semibold text-white shadow-[0_8px_24px_-10px_rgba(0,94,237,0.55)]"
+                className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl bg-[#005eed] px-3 py-2 text-xs font-semibold text-white shadow-[0_8px_24px_-10px_rgba(0,94,237,0.55)]"
               >
                 <Wand2 className="h-3.5 w-3.5" />
                 Optimize
@@ -541,25 +607,6 @@ export default function App() {
                 </span>
               ))}
             </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3 lg:px-6">
-            {LOCATIONS.map((loc) => {
-              const active = loc.id === locationId;
-              const n = all.filter((s) => s.locationId === loc.id).length;
-              return (
-                <button
-                  key={loc.id}
-                  onClick={() => setLocationId(loc.id)}
-                  className={`rounded-full px-3.5 py-1.5 text-sm transition ${
-                    active ? "bg-gold text-white" : "bg-white text-mist ring-1 ring-line hover:text-ivory"
-                  }`}
-                >
-                  {loc.name}
-                  <span className={`ml-2 text-[10px] ${active ? "text-white/80" : "text-mist"}`}>{n}</span>
-                </button>
-              );
-            })}
           </div>
 
           <div className="grid grid-cols-2 gap-2 px-4 py-4 sm:grid-cols-3 xl:grid-cols-9 lg:px-6">
@@ -950,7 +997,7 @@ export default function App() {
       )}
       <Chatbot all={bundle.sessions} setAll={setSessions} settings={{ ...settings, ai: { ...settings.ai, openaiKey: ENV.openaiKey || settings.ai.openaiKey, openaiModel: ENV.openaiModel || settings.ai.openaiModel } }} locationId={locationId} />
 
-      {aiOpen && (
+      {aiOpen && !genSummary && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[#0e1729]/70 backdrop-blur-md">
           <div className="w-[min(520px,92vw)] rounded-[28px] bg-white p-8 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
@@ -977,6 +1024,82 @@ export default function App() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {aiOpen && genSummary && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[#0e1729]/70 backdrop-blur-md">
+          <div className="max-h-[88vh] w-[min(680px,92vw)] overflow-y-auto rounded-[28px] bg-white p-8 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#005eed]">Generation report</p>
+                <h3 className="mt-2 font-serif text-3xl">{genSummary.total} classes decided</h3>
+              </div>
+              <button
+                onClick={() => {
+                  setAiOpen(false);
+                  setGenSummary(null);
+                }}
+                className="rounded-xl p-2 text-mist hover:bg-ink hover:text-ivory"
+                aria-label="Close report"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-5 grid grid-cols-3 gap-3">
+              <div className="rounded-2xl bg-ink p-4">
+                <p className="text-2xl font-semibold tabular-nums text-[#0e1729]">{genSummary.ai}</p>
+                <p className="mt-1 text-[11px] uppercase tracking-wide text-mist">Decided by AI</p>
+              </div>
+              <div className="rounded-2xl bg-ink p-4">
+                <p className="text-2xl font-semibold tabular-nums text-[#0e1729]">{genSummary.pinned}</p>
+                <p className="mt-1 text-[11px] uppercase tracking-wide text-mist">From pins</p>
+              </div>
+              <div className="rounded-2xl bg-ink p-4">
+                <p className="text-2xl font-semibold tabular-nums text-[#0e1729]">{genSummary.variety}</p>
+                <p className="mt-1 text-[11px] uppercase tracking-wide text-mist">Added for mix / balance</p>
+              </div>
+            </div>
+            <div className="mt-6 grid gap-6 md:grid-cols-2">
+              <div>
+                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-mist">By format</p>
+                <div className="space-y-1.5">
+                  {genSummary.byFormat.map(([name, count]) => (
+                    <div key={name} className="flex items-center gap-2 text-sm">
+                      <span className="w-32 truncate">{name}</span>
+                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink">
+                        <div className="h-full rounded-full bg-[#005eed]" style={{ width: `${(count / genSummary.total) * 100}%` }} />
+                      </div>
+                      <span className="w-6 text-right tabular-nums text-mist">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-mist">By trainer</p>
+                <div className="space-y-1.5">
+                  {genSummary.byTrainer.map(([name, count]) => (
+                    <div key={name} className="flex items-center gap-2 text-sm">
+                      <span className="w-32 truncate">{name}</span>
+                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink">
+                        <div className="h-full rounded-full bg-[#0e1729]" style={{ width: `${(count / genSummary.total) * 100}%` }} />
+                      </div>
+                      <span className="w-6 text-right tabular-nums text-mist">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setAiOpen(false);
+                setGenSummary(null);
+              }}
+              className="mt-6 w-full rounded-xl bg-[#0e1729] py-2.5 text-sm font-medium text-white"
+            >
+              Done
+            </button>
           </div>
         </div>
       )}

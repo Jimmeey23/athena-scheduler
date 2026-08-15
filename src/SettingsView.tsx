@@ -1,7 +1,17 @@
 import { useState } from "react";
+import { CheckCircle2, Circle, Search } from "lucide-react";
 import { DAYS, FORMATS, LOCATIONS, TRAINERS } from "./data";
 import type { CustomRule, Settings } from "./types";
-import { Panel } from "./ui";
+import { MultiSelect, Panel } from "./ui";
+
+const FAMILY_TINT: Record<string, string> = {
+  barre: "bg-rose-50/60",
+  mat: "bg-sky-50/60",
+  cycle: "bg-amber-50/60",
+  strength: "bg-emerald-50/60",
+  fit: "bg-violet-50/60",
+  special: "bg-slate-100/60",
+};
 
 const NAV = [
   {
@@ -54,6 +64,7 @@ export function SettingsView({
   const roster = settings.trainers?.length ? settings.trainers : TRAINERS;
   const trainers = roster.filter((t) => t.name.toLowerCase().includes(q.toLowerCase()));
   const updateTrainer = (id: string, next: (typeof roster)[number]) => patch({ trainers: roster.map((t) => (t.id === id ? next : t)) });
+  const formatList = settings.formats?.length ? settings.formats : FORMATS;
 
   return (
     <div className="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
@@ -150,10 +161,12 @@ export function SettingsView({
                                 onChange={(e) => updateTrainer(t.id, { ...t, name: e.target.value })}
                                 className="w-40 rounded-lg border border-line bg-white px-2 py-1 text-sm"
                               />
-                              <input
-                                value={t.specialty}
-                                onChange={(e) => updateTrainer(t.id, { ...t, specialty: e.target.value })}
-                                className="mt-1 w-40 rounded-lg border border-line bg-white px-2 py-1 text-[11px]"
+                              <MultiSelect
+                                className="mt-1 w-40"
+                                options={formatList.map((f) => ({ value: f.name, label: f.name }))}
+                                selected={t.specialty.split(" · ").map((s) => s.trim()).filter(Boolean)}
+                                onChange={(next) => updateTrainer(t.id, { ...t, specialty: next.join(" · ") })}
+                                placeholder="Formats…"
                               />
                             </div>
                           </div>
@@ -248,7 +261,6 @@ export function SettingsView({
         )}
 
         {section === "certs" && (() => {
-          const formatList = settings.formats?.length ? settings.formats : FORMATS;
           const setAll = (value: boolean) =>
             patch({
               trainers: roster.map((t) => ({
@@ -263,35 +275,53 @@ export function SettingsView({
             if (!t) return;
             updateTrainer(trainerId, { ...t, certs: { ...t.certs, ...Object.fromEntries(formatList.map((f) => [f.cert, value])) } });
           };
+          const groups: Array<{ family: string; formats: typeof formatList }> = [];
+          for (const f of formatList) {
+            const g = groups[groups.length - 1];
+            if (g && g.family === f.family) g.formats.push(f);
+            else groups.push({ family: f.family, formats: [f] });
+          }
           return (
             <Panel className="overflow-x-auto p-5">
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="font-serif text-2xl">Certifications</h2>
                   <p className="text-sm text-mist">Every format requires a matching cert. Uncertified trainers are never auto-assigned.</p>
                 </div>
-                <div className="flex gap-2">
-                  <button className="rounded-lg border border-line px-3 py-1.5 text-xs text-mist hover:text-ivory" onClick={() => setAll(true)}>
-                    Qualify all
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 rounded-xl border border-line bg-white px-2 py-1.5">
+                    <Search className="h-3.5 w-3.5 text-mist" />
+                    <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search trainer…" className="w-28 text-xs outline-none" />
+                  </div>
+                  <button className="inline-flex items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs text-[#005eed] hover:bg-ink" onClick={() => setAll(true)}>
+                    <CheckCircle2 className="h-3.5 w-3.5" /> Qualify all
                   </button>
-                  <button className="rounded-lg border border-line px-3 py-1.5 text-xs text-mist hover:text-ivory" onClick={() => setAll(false)}>
-                    Disqualify all
+                  <button className="inline-flex items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs text-mist hover:bg-ink" onClick={() => setAll(false)}>
+                    <Circle className="h-3.5 w-3.5" /> Disqualify all
                   </button>
                 </div>
               </div>
-              <table className="w-full text-left text-[11px]">
+              <table className="w-full border-separate border-spacing-0 text-left text-[11px]">
                 <thead>
+                  <tr>
+                    <th className="sticky left-0 z-10 bg-white py-1"></th>
+                    {groups.map((g) => (
+                      <th key={g.family} colSpan={g.formats.length} className={`px-1 py-1 text-center text-[9px] font-semibold uppercase tracking-wider text-mist ${FAMILY_TINT[g.family] ?? ""}`}>
+                        {g.family}
+                      </th>
+                    ))}
+                  </tr>
                   <tr className="text-mist">
-                    <th className="py-2">Trainer</th>
+                    <th className="sticky left-0 z-10 bg-white py-2 pr-3">Trainer</th>
                     {formatList.map((f) => (
-                      <th key={f.name} className="px-1 text-center">
+                      <th key={f.name} className={`px-1 pb-2 text-center ${FAMILY_TINT[f.family] ?? ""}`}>
                         <div className="whitespace-nowrap">{f.name}</div>
-                        <div className="mt-1 flex justify-center gap-1">
+                        <div className="mt-1 flex justify-center gap-2">
                           <button className="text-[#005eed]" title={`Qualify all for ${f.name}`} onClick={() => setColumn(f.cert, true)}>
-                            ●
+                            <CheckCircle2 className="h-3.5 w-3.5" />
                           </button>
                           <button className="text-line" title={`Disqualify all for ${f.name}`} onClick={() => setColumn(f.cert, false)}>
-                            ○
+                            <Circle className="h-3.5 w-3.5" />
                           </button>
                         </div>
                       </th>
@@ -299,31 +329,40 @@ export function SettingsView({
                   </tr>
                 </thead>
                 <tbody>
-                  {roster.map((t) => (
-                    <tr key={t.id} className="border-t border-line">
-                      <td className="py-2 pr-3">
+                  {trainers.map((t, ri) => (
+                    <tr key={t.id} className={ri % 2 ? "bg-ink/40" : ""}>
+                      <td className="sticky left-0 z-10 bg-white py-2 pr-3">
                         <div className="flex items-center gap-2">
-                          <span>{t.name}</span>
+                          <img src={t.photo} alt="" className="h-6 w-6 rounded-full object-cover ring-1 ring-line" />
+                          <span className="whitespace-nowrap font-medium">{t.name}</span>
                           <button className="text-[#005eed]" title={`Qualify ${t.name} for everything`} onClick={() => setRow(t.id, true)}>
-                            ●
+                            <CheckCircle2 className="h-3.5 w-3.5" />
                           </button>
                           <button className="text-line" title={`Disqualify ${t.name} from everything`} onClick={() => setRow(t.id, false)}>
-                            ○
+                            <Circle className="h-3.5 w-3.5" />
                           </button>
                         </div>
                       </td>
                       {formatList.map((f) => (
-                        <td key={f.name} className="text-center">
+                        <td key={f.name} className={`text-center ${FAMILY_TINT[f.family] ?? ""}`}>
                           <button
                             onClick={() => updateTrainer(t.id, { ...t, certs: { ...t.certs, [f.cert]: !t.certs[f.cert] } })}
-                            className={t.certs[f.cert] ? "text-[#005eed]" : "text-line"}
+                            className={`rounded-full p-1 transition ${t.certs[f.cert] ? "text-[#005eed]" : "text-line hover:text-mist"}`}
+                            title={`${t.name} · ${f.name}`}
                           >
-                            {t.certs[f.cert] ? "●" : "○"}
+                            {t.certs[f.cert] ? <CheckCircle2 className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
                           </button>
                         </td>
                       ))}
                     </tr>
                   ))}
+                  {!trainers.length && (
+                    <tr>
+                      <td colSpan={formatList.length + 1} className="py-6 text-center text-mist">
+                        No trainers match "{q}".
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </Panel>
@@ -331,11 +370,36 @@ export function SettingsView({
         })()}
 
         {section === "leave" && (
-          <Panel className="p-5">
-            <h2 className="font-serif text-2xl">Leave & off days</h2>
-            <p className="mb-4 text-sm text-mist">Binding for this week. Off days stack on top of historic week-off.</p>
-            <div className="space-y-3">
-              {TRAINERS.map((t) => {
+          <>
+            <Panel className="mb-4 p-5">
+              <h2 className="font-serif text-2xl">Leave</h2>
+              <p className="mb-4 text-sm text-mist">Hard block — a trainer on leave is never auto-assigned those days, no exceptions.</p>
+              <div className="space-y-2">
+                {settings.leave.map((l, i) => (
+                  <div key={i} className="flex flex-wrap items-center gap-2 rounded-2xl bg-ink px-3 py-2 text-sm">
+                    <span className="w-40 truncate font-medium">{roster.find((t) => t.id === l.trainerId)?.name ?? l.trainerId}</span>
+                    <span className="text-mist">{l.days.map((d) => DAYS[d]?.label).join(", ")}</span>
+                    <button
+                      className="ml-auto text-xs text-rose-700"
+                      onClick={() => patch({ leave: settings.leave.filter((_, idx) => idx !== i) })}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                {!settings.leave.length && <p className="text-sm text-mist">No leave entries.</p>}
+              </div>
+              <NewLeaveForm roster={roster} onAdd={(trainerId, days) => {
+                const existing = settings.leave.find((l) => l.trainerId === trainerId);
+                const merged = Array.from(new Set([...(existing?.days ?? []), ...days]));
+                patch({ leave: [...settings.leave.filter((l) => l.trainerId !== trainerId), { trainerId, days: merged }] });
+              }} />
+            </Panel>
+            <Panel className="p-5">
+              <h2 className="font-serif text-2xl">Off days</h2>
+              <p className="mb-4 text-sm text-mist">Binding for this week. Off days stack on top of historic week-off.</p>
+              <div className="space-y-3">
+                {TRAINERS.map((t) => {
                 const row = settings.offDays.find((o) => o.trainerId === t.id);
                 return (
                   <div key={t.id} className="flex flex-wrap items-center gap-2 rounded-2xl bg-ink px-3 py-2">
@@ -359,9 +423,10 @@ export function SettingsView({
                     })}
                   </div>
                 );
-              })}
-            </div>
-          </Panel>
+                })}
+              </div>
+            </Panel>
+          </>
         )}
 
         {section === "targets" && (
@@ -419,46 +484,138 @@ export function SettingsView({
           </Panel>
         )}
 
-        {section === "formats" && (
-          <Panel className="p-5">
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h2 className="font-serif text-2xl">Formats</h2>
-                <p className="text-sm text-mist">Add, rename, or delete class formats. Hosted / Foundations / SWEAT stay banned.</p>
-              </div>
-              <button
-                className="rounded-xl bg-[#005eed] px-3 py-2 text-xs text-white"
-                onClick={() =>
-                  patch({
-                    formats: [
-                      ...(settings.formats?.length ? settings.formats : FORMATS),
-                      { name: "New Format", studio: "Studio 1", duration: 50, accent: "#005eed", cert: "barre", family: "special" },
-                    ],
-                  })
-                }
-              >
-                + Format
-              </button>
-            </div>
-            <div className="space-y-2">
-              {(settings.formats?.length ? settings.formats : FORMATS).map((f, i) => (
-                <div key={f.name + i} className="grid grid-cols-2 gap-2 rounded-2xl bg-ink p-3 md:grid-cols-5">
-                  <input value={f.name} onChange={(e) => patch({ formats: (settings.formats || FORMATS).map((x, idx) => (idx === i ? { ...x, name: e.target.value } : x)) })} className="rounded-lg border border-line bg-white px-2 py-1 text-sm" />
-                  <input value={f.studio} onChange={(e) => patch({ formats: (settings.formats || FORMATS).map((x, idx) => (idx === i ? { ...x, studio: e.target.value } : x)) })} className="rounded-lg border border-line bg-white px-2 py-1 text-sm" />
-                  <input type="number" value={f.duration} onChange={(e) => patch({ formats: (settings.formats || FORMATS).map((x, idx) => (idx === i ? { ...x, duration: Number(e.target.value) } : x)) })} className="rounded-lg border border-line bg-white px-2 py-1 text-sm" />
-                  <select value={f.cert} onChange={(e) => patch({ formats: (settings.formats || FORMATS).map((x, idx) => (idx === i ? { ...x, cert: e.target.value as typeof f.cert } : x)) })} className="rounded-lg border border-line bg-white px-2 py-1 text-sm">
-                    {CERTS.map((c) => (
-                      <option key={c}>{c}</option>
-                    ))}
-                  </select>
-                  <button className="text-xs text-rose-700" onClick={() => patch({ formats: (settings.formats || FORMATS).filter((_, idx) => idx !== i) })}>
-                    Delete
-                  </button>
+        {section === "formats" && (() => {
+          const FAMILIES = ["barre", "mat", "cycle", "strength", "fit", "special"] as const;
+          const houseList = settings.locations?.length ? settings.locations : LOCATIONS;
+          const studioOptions = Array.from(new Set(houseList.flatMap((h) => h.rooms)));
+          const banned = new Set(settings.bannedFormats?.length ? settings.bannedFormats : []);
+          const legacyBanned = (settings.bannedFormats ?? []).filter((name) => !formatList.some((f) => f.name === name));
+          const toggleBanned = (name: string) =>
+            patch({ bannedFormats: banned.has(name) ? [...banned].filter((n) => n !== name) : [...banned, name] });
+          const updateFormat = (i: number, patchF: Partial<(typeof formatList)[number]>) =>
+            patch({ formats: formatList.map((x, idx) => (idx === i ? { ...x, ...patchF } : x)) });
+          return (
+            <Panel className="p-5">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h2 className="font-serif text-2xl">Formats</h2>
+                  <p className="text-sm text-mist">Every format the generator knows about, active or banned. Banned formats are never auto-assigned.</p>
                 </div>
-              ))}
-            </div>
-          </Panel>
-        )}
+                <button
+                  className="rounded-xl bg-[#005eed] px-3 py-2 text-xs text-white"
+                  onClick={() =>
+                    patch({
+                      formats: [
+                        ...formatList,
+                        { name: "New Format", studio: studioOptions[0] ?? "Studio 1", duration: 50, accent: "#005eed", cert: "barre", family: "special" },
+                      ],
+                    })
+                  }
+                >
+                  + Format
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="text-[10px] uppercase tracking-wider text-mist">
+                      <th className="py-2 pr-2">Name</th>
+                      <th className="pr-2">Family</th>
+                      <th className="pr-2">Studio</th>
+                      <th className="pr-2">Duration</th>
+                      <th className="pr-2">Cert</th>
+                      <th className="pr-2">Express of</th>
+                      <th className="pr-2">Active</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-line">
+                    {formatList.map((f, i) => {
+                      const active = !banned.has(f.name);
+                      return (
+                        <tr key={f.name + i}>
+                          <td className="py-2 pr-2">
+                            <input value={f.name} onChange={(e) => updateFormat(i, { name: e.target.value })} className="w-32 rounded-lg border border-line bg-white px-2 py-1 text-sm" />
+                          </td>
+                          <td className="pr-2">
+                            <select value={f.family} onChange={(e) => updateFormat(i, { family: e.target.value as typeof f.family })} className="rounded-lg border border-line bg-white px-2 py-1 text-sm">
+                              {FAMILIES.map((fam) => (
+                                <option key={fam} value={fam}>
+                                  {fam}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="pr-2">
+                            <select value={f.studio} onChange={(e) => updateFormat(i, { studio: e.target.value })} className="rounded-lg border border-line bg-white px-2 py-1 text-sm">
+                              {studioOptions.map((s) => (
+                                <option key={s} value={s}>
+                                  {s}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="pr-2">
+                            <input type="number" value={f.duration} onChange={(e) => updateFormat(i, { duration: Number(e.target.value) })} className="w-16 rounded-lg border border-line bg-white px-2 py-1 text-sm" />
+                          </td>
+                          <td className="pr-2">
+                            <select value={f.cert} onChange={(e) => updateFormat(i, { cert: e.target.value as typeof f.cert })} className="rounded-lg border border-line bg-white px-2 py-1 text-sm">
+                              {CERTS.map((c) => (
+                                <option key={c}>{c}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="pr-2">
+                            <select
+                              value={f.fullName ?? ""}
+                              onChange={(e) => updateFormat(i, { fullName: e.target.value || undefined, express: Boolean(e.target.value) })}
+                              className="rounded-lg border border-line bg-white px-2 py-1 text-sm"
+                            >
+                              <option value="">— full length —</option>
+                              {formatList.filter((o) => o.name !== f.name).map((o) => (
+                                <option key={o.name} value={o.name}>
+                                  {o.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="pr-2">
+                            <button
+                              onClick={() => toggleBanned(f.name)}
+                              className={`h-6 w-10 rounded-full ${active ? "bg-[#005eed]" : "bg-line"}`}
+                            >
+                              <span className={`block h-5 w-5 rounded-full bg-white shadow transition ${active ? "ml-4" : "ml-0.5"}`} />
+                            </button>
+                          </td>
+                          <td>
+                            <button className="text-xs text-rose-700" onClick={() => patch({ formats: formatList.filter((_, idx) => idx !== i) })}>
+                              Delete
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {legacyBanned.length > 0 && (
+                <div className="mt-5">
+                  <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-mist">Legacy banned formats (not in catalog)</p>
+                  <div className="flex flex-wrap gap-2">
+                    {legacyBanned.map((name) => (
+                      <span key={name} className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-xs">
+                        {name}
+                        <button className="text-rose-700" onClick={() => toggleBanned(name)}>
+                          Reactivate
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Panel>
+          );
+        })()}
 
         {section === "mix" && (
           <Panel className="p-5">
@@ -835,6 +992,41 @@ function RulesPanel({ settings, patch }: { settings: Settings; patch: (p: Partia
         ))}
       </div>
     </Panel>
+  );
+}
+
+function NewLeaveForm({ roster, onAdd }: { roster: Array<{ id: string; name: string }>; onAdd: (trainerId: string, days: number[]) => void }) {
+  const [trainerId, setTrainerId] = useState(roster[0]?.id ?? "");
+  const [days, setDays] = useState<number[]>([]);
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-dashed border-line px-3 py-2">
+      <select value={trainerId} onChange={(e) => setTrainerId(e.target.value)} className="rounded-lg border border-line bg-white px-2 py-1 text-sm">
+        {roster.map((t) => (
+          <option key={t.id} value={t.id}>
+            {t.name}
+          </option>
+        ))}
+      </select>
+      {DAYS.map((d) => (
+        <button
+          key={d.key}
+          onClick={() => setDays((prev) => (prev.includes(d.key) ? prev.filter((x) => x !== d.key) : [...prev, d.key]))}
+          className={`rounded-lg px-2 py-1 text-[11px] ${days.includes(d.key) ? "bg-[#005eed] text-white" : "bg-white ring-1 ring-line"}`}
+        >
+          {d.label}
+        </button>
+      ))}
+      <button
+        className="ml-auto rounded-xl bg-[#0e1729] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+        disabled={!trainerId || !days.length}
+        onClick={() => {
+          onAdd(trainerId, days);
+          setDays([]);
+        }}
+      >
+        Add leave
+      </button>
+    </div>
   );
 }
 

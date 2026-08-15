@@ -1,5 +1,6 @@
-import { useState, type ReactNode } from "react";
-import { Copy, Search, Trash2, UserRound } from "lucide-react";
+import { useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { Copy, Pin, PinOff, Search, Trash2, UserRound } from "lucide-react";
 import { DAYS, TAG_META, TRAINERS, trainerById, trainerLoad } from "./data";
 import { slotHistory } from "./engine";
 import type { Session, Tag } from "./types";
@@ -53,6 +54,7 @@ export type CardActions = {
   onRemove?: (s: Session) => void;
   onCopy?: (s: Session) => void;
   onSimilar?: (s: Session) => void;
+  onTogglePin?: (s: Session) => void;
 };
 
 export function ClassCard({
@@ -125,6 +127,9 @@ export function ClassCard({
           </div>
         </button>
         <div className="pointer-events-none absolute inset-x-1 top-1 z-10 flex justify-end gap-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
+          <IconBtn title={pinned ? "Unpin class" : "Pin class"} onClick={() => actions.onTogglePin?.(session)}>
+            {pinned ? <PinOff className="h-2.5 w-2.5" /> : <Pin className="h-2.5 w-2.5" />}
+          </IconBtn>
           <IconBtn title="Change trainer" onClick={() => actions.onSwap?.(session)}>
             <UserRound className="h-2.5 w-2.5" />
           </IconBtn>
@@ -184,6 +189,9 @@ export function ClassCard({
         </div>
       </button>
       <div className="pointer-events-none absolute inset-x-2 top-2 z-10 flex justify-end gap-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
+        <IconBtn title={pinned ? "Unpin class" : "Pin class"} onClick={() => actions.onTogglePin?.(session)}>
+          {pinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
+        </IconBtn>
         <IconBtn title="Change trainer" onClick={() => actions.onSwap?.(session)}>
           <UserRound className="h-3 w-3" />
         </IconBtn>
@@ -277,6 +285,119 @@ export function EmptySlot({
 
 export function Panel({ className = "", children }: { className?: string; children: ReactNode }) {
   return <div className={`panel rounded-3xl ${className}`}>{children}</div>;
+}
+
+// Portals its open panel to document.body and positions it with `fixed` coords computed from the
+// trigger's bounding rect. Needed because any ancestor with overflow-x/y-auto (e.g. a scrolling
+// header) clips ordinary `absolute` popups — `fixed` escapes that clipping entirely.
+function usePortalPanel<T extends HTMLElement>() {
+  const triggerRef = useRef<T>(null);
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const openPanel = () => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (r) setPos({ top: r.bottom + 6, left: r.left, width: r.width });
+    setOpen(true);
+  };
+  const close = () => setOpen(false);
+  return { triggerRef, open, pos, openPanel, close, toggle: () => (open ? close() : openPanel()) };
+}
+
+function PortalPanel({ pos, onClose, children }: { pos: { top: number; left: number; width: number }; onClose: () => void; children: ReactNode }) {
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-[998]" onClick={onClose} />
+      <div
+        className="fixed z-[999] max-h-64 overflow-y-auto rounded-xl border border-line bg-white p-2 shadow-2xl"
+        style={{ top: pos.top, left: pos.left, minWidth: pos.width }}
+      >
+        {children}
+      </div>
+    </>,
+    document.body
+  );
+}
+
+// Multi-select dropdown — panel portals out of the DOM tree so scrolling/overflow ancestors
+// (e.g. a horizontally-scrolling header) never clip it.
+export function MultiSelect({
+  options,
+  selected,
+  onChange,
+  placeholder = "Select…",
+  className = "",
+}: {
+  options: Array<{ value: string; label: string }>;
+  selected: string[];
+  onChange: (next: string[]) => void;
+  placeholder?: string;
+  className?: string;
+}) {
+  const { triggerRef, open, pos, toggle, close } = usePortalPanel<HTMLButtonElement>();
+  const toggleValue = (value: string) => onChange(selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value]);
+  const label = selected.length ? options.filter((o) => selected.includes(o.value)).map((o) => o.label).join(", ") : placeholder;
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={toggle}
+        className={`truncate rounded-lg border border-line bg-white px-2 py-1 text-left text-[11px] text-ivory ${className}`}
+      >
+        {label}
+      </button>
+      {open && pos && (
+        <PortalPanel pos={pos} onClose={close}>
+          {options.map((o) => (
+            <label key={o.value} className="flex items-center gap-2 rounded-lg px-2 py-1 text-xs hover:bg-ink">
+              <input type="checkbox" checked={selected.includes(o.value)} onChange={() => toggleValue(o.value)} />
+              {o.label}
+            </label>
+          ))}
+        </PortalPanel>
+      )}
+    </>
+  );
+}
+
+// Single-select dropdown, same portal mechanics as MultiSelect — use in place of a native
+// <select> wherever it sits inside a scrolling/overflow-clipped container.
+export function Dropdown({
+  value,
+  options,
+  onChange,
+  className = "",
+}: {
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (next: string) => void;
+  className?: string;
+}) {
+  const { triggerRef, open, pos, toggle, close } = usePortalPanel<HTMLButtonElement>();
+  const label = options.find((o) => o.value === value)?.label ?? value;
+  return (
+    <>
+      <button ref={triggerRef} type="button" onClick={toggle} className={className}>
+        {label}
+      </button>
+      {open && pos && (
+        <PortalPanel pos={pos} onClose={close}>
+          {options.map((o) => (
+            <button
+              key={o.value}
+              onClick={() => {
+                onChange(o.value);
+                close();
+              }}
+              className={`block w-full whitespace-nowrap rounded-lg px-3 py-1.5 text-left text-sm hover:bg-ink ${o.value === value ? "font-semibold text-[#005eed]" : ""}`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </PortalPanel>
+      )}
+    </>
+  );
 }
 
 export function trainerWeekHours(all: Session[], trainerId: string) {
