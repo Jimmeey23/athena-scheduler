@@ -511,17 +511,15 @@ export default function App() {
                 </div>
               )}
             </div>
-            <select
+            <Dropdown
               value={locationId}
-              onChange={(e) => setLocationId(e.target.value)}
-              className="shrink-0 rounded-xl bg-white px-3 py-2 text-xs text-ivory ring-1 ring-line hover:text-mist"
-            >
-              {LOCATIONS.map((loc) => (
-                <option key={loc.id} value={loc.id}>
-                  {loc.name} · {all.filter((s) => s.locationId === loc.id).length}
-                </option>
-              ))}
-            </select>
+              onChange={setLocationId}
+              className="shrink-0 whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs text-ivory ring-1 ring-line hover:text-mist"
+              options={LOCATIONS.map((loc) => ({
+                value: loc.id,
+                label: `${loc.name} · ${all.filter((s) => s.locationId === loc.id).length}`,
+              }))}
+            />
             <div className="flex shrink-0 flex-nowrap gap-2">
               <div className="relative shrink-0">
                 <button onClick={() => setExportOpen((o) => !o)} className="whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory">
