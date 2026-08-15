@@ -1,4 +1,5 @@
-import { DAYS, resolveLocationId } from "./data";
+import { DAYS, FORMATS, resolveLocationId } from "./data";
+import type { CertKey, Trainer } from "./types";
 
 export type PerfRow = {
   raw: Record<string, string>;
@@ -267,6 +268,44 @@ function push(map: Map<string, PerfRow[]>, key: string, row: PerfRow) {
   else map.set(key, [row]);
 }
 
+// Format name (normalized) -> cert key, built once from the static catalog.
+const FORMAT_CERT = new Map(FORMATS.map((f) => [norm(f.name), f.cert]));
+
+// Trainer name (normalized) -> session count per cert their history shows. Rebuilt whenever
+// performance rows load. Counts, not just presence, because a single row is as likely to be a
+// one-off substitute cover as a real qualification — see MIN_HISTORIC_CERT_SESSIONS below.
+let HIST_CERTS = new Map<string, Map<CertKey, number>>();
+
+// A trainer needs to show up teaching a format this many times before the source sheet is trusted
+// to auto-certify them for it. One stray row (a covered class, a data-entry slip) must not be
+// enough to open up a full qualification — that flooded the candidate pool with trainers who were
+// never really meant to teach the format, which diluted average fill/check-in across the board.
+const MIN_HISTORIC_CERT_SESSIONS = 3;
+
+export function historicCertsFor(trainerName: string) {
+  const counts = HIST_CERTS.get(norm(trainerName));
+  if (!counts) return [];
+  return [...counts.entries()].filter(([, n]) => n >= MIN_HISTORIC_CERT_SESSIONS).map(([c]) => c);
+}
+
+// Grants a cert whenever the source sheet proves the trainer actually ran that format — additive
+// only, so it fills in gaps in the hand-maintained defaults (or an admin's own edits) without ever
+// un-checking a cert someone deliberately turned on. Returns the same array reference when nothing
+// changes, so callers can skip a state update.
+export function applyHistoricCerts(trainers: Trainer[]): Trainer[] {
+  if (!HIST_CERTS.size) return trainers;
+  let anyChanged = false;
+  const next = trainers.map((t) => {
+    const derived = historicCertsFor(t.name);
+    if (!derived.length) return t;
+    const missing = derived.filter((c) => !t.certs[c]);
+    if (!missing.length) return t;
+    anyChanged = true;
+    return { ...t, certs: { ...t.certs, ...Object.fromEntries(missing.map((c) => [c, true])) } };
+  });
+  return anyChanged ? next : trainers;
+}
+
 export function setPerformanceRows(rows: PerfRow[]) {
   STORE = rows;
   IDX.exact.clear();
@@ -279,6 +318,7 @@ export function setPerformanceRows(rows: PerfRow[]) {
   IDX.classDayLoc.clear();
   IDX.classDayLocTrainer.clear();
   IDX.classLoc.clear();
+  HIST_CERTS = new Map();
   for (const r of rows) {
     const cls = norm(r.className);
     const tr = norm(r.trainer);
@@ -294,6 +334,12 @@ export function setPerformanceRows(rows: PerfRow[]) {
     push(IDX.classDayLoc, `${r.locationId}|${r.dayKey}|${cls}`, r);
     push(IDX.classDayLocTrainer, `${r.locationId}|${r.dayKey}|${cls}|${tr}`, r);
     push(IDX.classLoc, `${r.locationId}|${cls}`, r);
+    const cert = FORMAT_CERT.get(cls);
+    if (cert) {
+      const counts = HIST_CERTS.get(tr) ?? new Map<CertKey, number>();
+      counts.set(cert, (counts.get(cert) ?? 0) + 1);
+      HIST_CERTS.set(tr, counts);
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Area, AreaChart, Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { DAYS, LOCATIONS, TIMES, locationById, trainerById, trainerLoad } from "./data";
+import { DAYS, LOCATIONS, TIMES, daysWithDates, locationById, trainerById, trainerLoad } from "./data";
 import type { Session } from "./types";
 import { ClassCard, EmptySlot, FillBar, Panel, ScoreRing, TagChip, trainerWeekHours, type CardActions } from "./ui";
 
@@ -26,6 +26,7 @@ export function GridView({
   focusTrainer,
   query,
   actions,
+  weekStart,
   onAdd,
   onOpenCreate,
   onDropSession,
@@ -39,12 +40,14 @@ export function GridView({
   focusTrainer: string | null;
   query: string;
   actions: CardActions;
+  weekStart: Date;
   onAdd?: (opt: { day: number; time: string; name: string; trainerId: string }) => void;
   onOpenCreate?: (day: number, time: string) => void;
   onDropSession?: (sessionId: string, day: number, time: string) => void;
   onDayClick?: (day: number) => void;
   onTimeClick?: (time: string) => void;
 }) {
+  const days = daysWithDates(weekStart);
   const q = query.toLowerCase();
   const matches = (s: Session) => {
     if (focusTrainer && s.trainerId !== focusTrainer) return false;
@@ -58,7 +61,7 @@ export function GridView({
       <div className="min-w-[1180px]">
         <div className="grid grid-cols-[72px_repeat(7,minmax(0,1fr))] gap-2 pb-2">
           <div />
-          {DAYS.map((d) => {
+          {days.map((d) => {
             const count = sessions.filter((s) => s.day === d.key).length;
             return (
               <button key={d.key} onClick={() => onDayClick?.(d.key)} className={`rounded-2xl px-3 py-2.5 text-center ${d.today ? "bg-[#005eed]/10 ring-1 ring-[#005eed]/30" : "bg-white ring-1 ring-line"}`}>
@@ -80,7 +83,7 @@ export function GridView({
                     {time}
                   </button>
                 </div>
-                {DAYS.map((d) => {
+                {days.map((d) => {
                   const cells = sessions.filter((s) => s.day === d.key && s.time === time);
                   return (
                     <div
@@ -314,19 +317,61 @@ export function TrainerView({ sessions, onSelect }: { sessions: Session[]; onSel
   );
 }
 
-const LOC_CODE: Record<string, { code: string; city: string }> = {
-  copper: { code: "CC", city: "MUMBAI" },
-  courtside: { code: "CS", city: "MUMBAI" },
-  kenkere: { code: "KE", city: "MUMBAI" },
-  kwality: { code: "KW", city: "MUMBAI" },
-  supreme: { code: "SU", city: "MUMBAI" },
+const LOC_CODE_ONLY: Record<string, string> = {
+  copper: "CC",
+  courtside: "CS",
+  kenkere: "KE",
+  kwality: "KW",
+  supreme: "SU",
 };
 
-export function MultiView({ all, actions, onOpenCreate }: { all: Session[]; actions: CardActions; onOpenCreate?: (locationId: string, day: number, time: string) => void }) {
+// City is read from each location's own `area` field (its last comma-separated segment) rather than
+// a second hardcoded map — Kenkere/Copper are Bengaluru, not Mumbai, and a separate static table
+// went stale the moment that stopped being true for every house.
+function cityOf(locationId: string) {
+  const area = locationById(locationId).area;
+  const last = area.split(",").pop()?.trim();
+  return (last || area).toUpperCase();
+}
+
+const LOC_CODE: Record<string, { code: string; city: string }> = Object.fromEntries(
+  Object.entries(LOC_CODE_ONLY).map(([id, code]) => [id, { code, city: cityOf(id) }])
+);
+
+// Locations grouped by city rather than the flat authoring order in data.ts, which interleaves them
+// (Kwality/Mumbai, Supreme/Mumbai, Kenkere/Bengaluru, Courtside/Mumbai, Copper/Bengaluru) — every
+// house sharing a city now sits together, both in the toggle row and the grid's columns.
+const CITY_PRIORITY = ["MUMBAI", "BENGALURU"];
+const LOCATIONS_BY_CITY = [...LOCATIONS].sort((a, b) => {
+  const pa = CITY_PRIORITY.indexOf(cityOf(a.id));
+  const pb = CITY_PRIORITY.indexOf(cityOf(b.id));
+  return (pa < 0 ? 99 : pa) - (pb < 0 ? 99 : pb);
+});
+
+export function MultiView({
+  all,
+  actions,
+  onOpenCreate,
+  focusTrainer,
+}: {
+  all: Session[];
+  actions: CardActions;
+  onOpenCreate?: (locationId: string, day: number, time: string) => void;
+  focusTrainer?: string | null;
+}) {
   const times = [...new Set([...TIMES, ...all.map((s) => s.time)])].sort();
-  const [visibleLocationIds, setVisibleLocationIds] = useState(() => LOCATIONS.map((l) => l.id));
-  const visibleLocations = LOCATIONS.filter((l) => visibleLocationIds.includes(l.id));
+  const [visibleLocationIds, setVisibleLocationIds] = useState(() => LOCATIONS_BY_CITY.map((l) => l.id));
+  const visibleLocations = LOCATIONS_BY_CITY.filter((l) => visibleLocationIds.includes(l.id));
   const locationCount = Math.max(visibleLocations.length, 1);
+  // Runs of consecutive same-city locations within the visible set, for the city header row —
+  // consecutive because LOCATIONS_BY_CITY is already grouped, so a city only ever appears as one run.
+  const cityGroups = visibleLocations.reduce<Array<{ city: string; count: number }>>((groups, l) => {
+    const city = LOC_CODE[l.id]?.city ?? "—";
+    const last = groups[groups.length - 1];
+    if (last && last.city === city) last.count += 1;
+    else groups.push({ city, count: 1 });
+    return groups;
+  }, []);
   const laneWidth = 190;
   const gridTemplateColumns = `88px repeat(${DAYS.length * locationCount}, minmax(${laneWidth}px, ${laneWidth}px))`;
   const minWidth = 88 + DAYS.length * locationCount * laneWidth;
@@ -341,7 +386,7 @@ export function MultiView({ all, actions, onOpenCreate }: { all: Session[]; acti
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-2xl font-semibold tracking-tight">Multi-Location Schedule</h2>
         <div className="flex flex-wrap gap-1.5 rounded-2xl bg-white p-1 ring-1 ring-line">
-          {LOCATIONS.map((l) => {
+          {LOCATIONS_BY_CITY.map((l) => {
             const active = visibleLocationIds.includes(l.id);
             return (
               <button
@@ -359,7 +404,7 @@ export function MultiView({ all, actions, onOpenCreate }: { all: Session[]; acti
       </div>
       <div className="rounded-3xl border border-line bg-white" style={{ minWidth }}>
         <div className="grid" style={{ gridTemplateColumns }}>
-          <div className="sticky left-0 top-0 z-40 row-span-2 border-b border-r border-line bg-white px-2 py-3 text-[11px] font-semibold uppercase text-mist">Time</div>
+          <div className="sticky left-0 top-0 z-40 row-span-3 border-b border-r border-line bg-white px-2 py-3 text-[11px] font-semibold uppercase text-mist">Time</div>
           {DAYS.map((d) => (
             <div key={d.key} className="sticky top-0 z-30 border-b border-l border-line bg-white px-3 py-3" style={{ gridColumn: `span ${locationCount}` }}>
               <div className="flex items-baseline gap-2">
@@ -369,13 +414,23 @@ export function MultiView({ all, actions, onOpenCreate }: { all: Session[]; acti
               </div>
             </div>
           ))}
+          {/* Cities grouped as spanning header bands — locations are pre-sorted by city, so each
+              city forms exactly one contiguous run of columns per day block. */}
+          {DAYS.flatMap((d) =>
+            cityGroups.map((g, gi) => (
+              <div
+                key={`${d.key}-city-${gi}`}
+                className="sticky top-[45px] z-30 border-b border-l border-line bg-[#eef4ff] px-2 py-1.5 text-center text-[9px] font-bold uppercase tracking-wider text-[#005eed]"
+                style={{ gridColumn: `span ${g.count}` }}
+              >
+                {g.city}
+              </div>
+            ))
+          )}
           {DAYS.flatMap((d) =>
             visibleLocations.map((l) => (
-              <div key={`${d.key}-${l.id}`} className="sticky top-[45px] z-30 border-b border-l border-line bg-[#fafafa] px-2 py-2 text-center text-[9px] font-semibold uppercase text-mist">
-                <div>{LOC_CODE[l.id]?.city || "CITY"}</div>
-                <div className="text-[#0e1729]">
-                  {LOC_CODE[l.id]?.code || l.id.slice(0, 2).toUpperCase()} ({all.filter((s) => s.day === d.key && s.locationId === l.id).length})
-                </div>
+              <div key={`${d.key}-${l.id}`} className="sticky top-[73px] z-30 border-b border-l border-line bg-[#fafafa] px-2 py-2 text-center text-[9px] font-semibold uppercase text-[#0e1729]">
+                {LOC_CODE[l.id]?.code || l.id.slice(0, 2).toUpperCase()} ({all.filter((s) => s.day === d.key && s.locationId === l.id).length})
               </div>
             ))
           )}
@@ -391,7 +446,14 @@ export function MultiView({ all, actions, onOpenCreate }: { all: Session[]; acti
                     return (
                       <div key={`${time}-${d.key}-${l.id}`} className="min-w-0 space-y-2 border-l border-t border-line bg-[#fafafa] p-2">
                         {cards.map((s) => (
-                          <ClassCard key={s.id} session={s} compact weekHours={trainerWeekHours(all, s.trainerId)} actions={actions} />
+                          <ClassCard
+                            key={s.id}
+                            session={s}
+                            compact
+                            dimmed={Boolean(focusTrainer) && s.trainerId !== focusTrainer}
+                            weekHours={trainerWeekHours(all, s.trainerId)}
+                            actions={actions}
+                          />
                         ))}
                         {!cards.length && (
                           <button

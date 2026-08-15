@@ -216,10 +216,17 @@ export type GenReport = {
     floor: number;
     floorMet: boolean;
     avgScore: number;
+    avgFill: number;
+    avgCheckin: number;
+    qualityMet: boolean;
     barreShare: number;
     violations: string[];
   }>;
   notes: string[];
   // Rest days actually granted this run, per trainer id — auto-assigned from load unless pinned.
   weekOffs?: Record<string, number[]>;
+  // False when the source-sheet session history hadn't loaded yet at generation time, so every
+  // placement was picked blind — the caller (App.tsx) uses this to detect a bootstrap schedule that
+  // must be silently replaced once real data arrives, instead of just re-scoring the same blind picks.
+  usedPerformanceData: boolean;
 };

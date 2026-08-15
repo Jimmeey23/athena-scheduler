@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { CheckCircle2, Circle, Search } from "lucide-react";
+import { Check, CheckCircle2, Circle, Search } from "lucide-react";
 import { DAYS, FORMATS, LOCATIONS, TRAINERS } from "./data";
 import type { CustomRule, Settings } from "./types";
-import { MultiSelect, Panel } from "./ui";
+import { Panel } from "./ui";
 
 const FAMILY_TINT: Record<string, string> = {
   barre: "bg-rose-50/60",
@@ -153,20 +153,22 @@ export function SettingsView({
                     return (
                       <tr key={t.id}>
                         <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <img src={t.photo} alt="" className="h-8 w-8 rounded-full object-cover" />
-                            <div>
+                          <div className="flex items-start gap-2">
+                            <img src={t.photo} alt="" className="mt-0.5 h-8 w-8 rounded-full object-cover" />
+                            <div className="min-w-0">
                               <input
                                 value={t.name}
                                 onChange={(e) => updateTrainer(t.id, { ...t, name: e.target.value })}
-                                className="w-40 rounded-lg border border-line bg-white px-2 py-1 text-sm"
+                                className="w-44 rounded-lg border border-line bg-white px-2 py-1 text-sm"
                               />
-                              <MultiSelect
-                                className="mt-1 w-40"
-                                options={formatList.map((f) => ({ value: f.name, label: f.name }))}
-                                selected={t.specialty.split(" · ").map((s) => s.trim()).filter(Boolean)}
-                                onChange={(next) => updateTrainer(t.id, { ...t, specialty: next.join(" · ") })}
-                                placeholder="Formats…"
+                              {/* Free-text display label only (shown on trainer cards elsewhere) — not
+                                  a qualification. What a trainer is actually allowed to teach is set
+                                  exclusively on the Certifications tab. */}
+                              <input
+                                value={t.specialty}
+                                onChange={(e) => updateTrainer(t.id, { ...t, specialty: e.target.value })}
+                                placeholder="Specialty label…"
+                                className="mt-1.5 w-44 rounded-lg border border-line bg-white px-2 py-1 text-[11px] text-mist"
                               />
                             </div>
                           </div>
@@ -318,58 +320,90 @@ export function SettingsView({
               <table className="w-full border-separate border-spacing-0 text-left text-[11px]">
                 <thead>
                   <tr>
-                    <th className="sticky left-0 z-10 bg-white py-1"></th>
-                    {groups.map((g) => (
-                      <th key={g.family} colSpan={g.formats.length} className={`px-1 py-1 text-center text-[9px] font-semibold uppercase tracking-wider text-mist ${FAMILY_TINT[g.family] ?? ""}`}>
+                    <th className="sticky left-0 z-20 border-b border-line bg-white py-1"></th>
+                    {groups.map((g, gi) => (
+                      <th
+                        key={g.family}
+                        colSpan={g.formats.length}
+                        className={`border-b border-line px-1 py-1.5 text-center text-[9px] font-semibold uppercase tracking-wider text-mist ${FAMILY_TINT[g.family] ?? ""} ${gi > 0 ? "border-l-2 border-l-line" : ""}`}
+                      >
                         {g.family}
                       </th>
                     ))}
                   </tr>
                   <tr className="text-mist">
-                    <th className="sticky left-0 z-10 bg-white py-2 pr-3">Trainer</th>
-                    {formatList.map((f) => (
-                      <th key={f.name} className={`px-1 pb-2 text-center ${FAMILY_TINT[f.family] ?? ""}`}>
-                        <div className="whitespace-nowrap">{f.name}</div>
-                        <div className="mt-1 flex justify-center gap-2">
-                          <button className="text-[#005eed]" title={`Qualify all for ${f.name}`} onClick={() => setColumn(f.cert, true)}>
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                          </button>
-                          <button className="text-line" title={`Disqualify all for ${f.name}`} onClick={() => setColumn(f.cert, false)}>
-                            <Circle className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </th>
-                    ))}
+                    <th className="sticky left-0 z-20 border-b border-line bg-white py-2 pr-3">Trainer</th>
+                    {formatList.map((f, fi) => {
+                      const firstOfGroup = fi === 0 || formatList[fi - 1].family !== f.family;
+                      return (
+                        <th
+                          key={f.name}
+                          className={`w-[76px] min-w-[76px] max-w-[76px] border-b border-line px-1 pb-2 pt-1 text-center align-bottom ${FAMILY_TINT[f.family] ?? ""} ${firstOfGroup ? "border-l-2 border-l-line" : ""}`}
+                        >
+                          <div className="whitespace-normal leading-tight" title={f.name}>
+                            {f.name}
+                          </div>
+                          <div className="mt-1 flex justify-center gap-1.5">
+                            <button className="rounded p-0.5 text-[#005eed] hover:bg-white/60" title={`Qualify all for ${f.name}`} onClick={() => setColumn(f.cert, true)}>
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button className="rounded p-0.5 text-line hover:bg-white/60 hover:text-mist" title={`Disqualify all for ${f.name}`} onClick={() => setColumn(f.cert, false)}>
+                              <Circle className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
-                  {trainers.map((t, ri) => (
-                    <tr key={t.id} className={ri % 2 ? "bg-ink/40" : ""}>
-                      <td className="sticky left-0 z-10 bg-white py-2 pr-3">
-                        <div className="flex items-center gap-2">
-                          <img src={t.photo} alt="" className="h-6 w-6 rounded-full object-cover ring-1 ring-line" />
-                          <span className="whitespace-nowrap font-medium">{t.name}</span>
-                          <button className="text-[#005eed]" title={`Qualify ${t.name} for everything`} onClick={() => setRow(t.id, true)}>
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                          </button>
-                          <button className="text-line" title={`Disqualify ${t.name} from everything`} onClick={() => setRow(t.id, false)}>
-                            <Circle className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                      {formatList.map((f) => (
-                        <td key={f.name} className={`text-center ${FAMILY_TINT[f.family] ?? ""}`}>
-                          <button
-                            onClick={() => updateTrainer(t.id, { ...t, certs: { ...t.certs, [f.cert]: !t.certs[f.cert] } })}
-                            className={`rounded-full p-1 transition ${t.certs[f.cert] ? "text-[#005eed]" : "text-line hover:text-mist"}`}
-                            title={`${t.name} · ${f.name}`}
-                          >
-                            {t.certs[f.cert] ? <CheckCircle2 className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
-                          </button>
+                  {trainers.map((t, ri) => {
+                    // Solid hex only — no /NN opacity utilities. The first column is `position:
+                    // sticky`, so it visually overlays whatever has scrolled underneath it; any
+                    // translucent background there (Tailwind's bg-ink/30, or bg-[inherit] inheriting
+                    // that same translucency) lets the scrolled-away columns show through as ghosting.
+                    const rowBg = ri % 2 ? "bg-[#f5f6f8]" : "bg-white";
+                    const rowHover = "group-hover:bg-[#eef4ff]";
+                    return (
+                      <tr key={t.id} className={`group ${rowBg} hover:bg-[#eef4ff]`}>
+                        <td className={`sticky left-0 z-10 border-b border-line py-2 pr-3 ${rowBg} ${rowHover}`}>
+                          <div className="flex items-center gap-2">
+                            <img src={t.photo} alt="" className="h-6 w-6 shrink-0 rounded-full object-cover ring-1 ring-line" />
+                            <span className="whitespace-nowrap font-medium">{t.name}</span>
+                            <button className="rounded p-0.5 text-[#005eed] hover:bg-ink" title={`Qualify ${t.name} for everything`} onClick={() => setRow(t.id, true)}>
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button className="rounded p-0.5 text-line hover:bg-ink hover:text-mist" title={`Disqualify ${t.name} from everything`} onClick={() => setRow(t.id, false)}>
+                              <Circle className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         </td>
-                      ))}
-                    </tr>
-                  ))}
+                        {formatList.map((f, fi) => {
+                          const firstOfGroup = fi > 0 && formatList[fi - 1].family !== f.family;
+                          return (
+                            <td
+                              key={f.name}
+                              className={`w-[76px] min-w-[76px] max-w-[76px] border-b border-line ${FAMILY_TINT[f.family] ?? ""} ${firstOfGroup ? "border-l-2 border-l-line" : ""}`}
+                            >
+                            <button
+                              onClick={() => updateTrainer(t.id, { ...t, certs: { ...t.certs, [f.cert]: !t.certs[f.cert] } })}
+                              className="flex w-full items-center justify-center py-2"
+                              title={`${t.name} · ${f.name}`}
+                            >
+                              <span
+                                className={`flex h-5 w-5 items-center justify-center rounded-full transition ${
+                                  t.certs[f.cert] ? "bg-[#005eed] text-white" : "border border-line bg-white text-transparent hover:border-mist"
+                                }`}
+                              >
+                                <Check className="h-3 w-3" strokeWidth={3} />
+                              </span>
+                            </button>
+                          </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
                   {!trainers.length && (
                     <tr>
                       <td colSpan={formatList.length + 1} className="py-6 text-center text-mist">
@@ -842,7 +876,9 @@ export function SettingsView({
         {section === "quality" && (
           <Panel className="p-5">
             <h2 className="font-serif text-2xl">Quality gates</h2>
-            <p className="mb-4 text-sm text-mist">Repeated-history options below either floor are excluded unless pinned. Non-pinned rows under the accept score are rejected.</p>
+            <p className="mb-4 text-sm text-mist">
+              A combo must clear at least one floor — fill% or avg check-in — to be used; failing both excludes it unless pinned. Non-pinned rows under the accept score are also rejected.
+            </p>
             <div className="grid gap-4 md:grid-cols-3">
               <Num label="Avg check-in floor" value={settings.quality.checkinFloor} step={0.5} onChange={(v) => patch({ quality: { ...settings.quality, checkinFloor: v } })} />
               <Num label="Fill rate floor %" value={settings.quality.fillFloor} onChange={(v) => patch({ quality: { ...settings.quality, fillFloor: v } })} />

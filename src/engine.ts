@@ -151,9 +151,8 @@ function allowedTime(day: number, time: string, settings?: Settings) {
   return true;
 }
 
-export function historicFor(locationId: string, day: number, time: string, format: string, trainerId: string) {
-  const trainer = BASE_TRAINERS.find((t) => t.id === trainerId);
-  const any = lookupAgg(locationId, day, time, format, trainer?.name || trainerId);
+export function historicFor(locationId: string, day: number, time: string, format: string, trainerName: string) {
+  const any = lookupAgg(locationId, day, time, format, trainerName);
   const sessions = any.sessions;
   const trend = sessions >= 8 ? 4 : sessions >= 4 ? 0 : -6;
   return { checkin: any.checkin, fill: any.fill, trend, sessions, revenue: any.revenue, rows: any.rows, tier: any.tier };
@@ -162,12 +161,12 @@ export function historicFor(locationId: string, day: number, time: string, forma
 // Memoizes historicFor for the duration of a single generateSchedule() run — the same
 // (location, day, time, format, trainer) lookup happens hundreds of times per trial.
 let historicCache: Map<string, ReturnType<typeof historicFor>> | null = null;
-function historicForFast(locationId: string, day: number, time: string, format: string, trainerId: string) {
-  if (!historicCache) return historicFor(locationId, day, time, format, trainerId);
-  const key = `${locationId}|${day}|${time}|${format}|${trainerId}`;
+function historicForFast(locationId: string, day: number, time: string, format: string, trainerName: string) {
+  if (!historicCache) return historicFor(locationId, day, time, format, trainerName);
+  const key = `${locationId}|${day}|${time}|${format}|${trainerName}`;
   let v = historicCache.get(key);
   if (!v) {
-    v = historicFor(locationId, day, time, format, trainerId);
+    v = historicFor(locationId, day, time, format, trainerName);
     historicCache.set(key, v);
   }
   return v;
@@ -240,7 +239,7 @@ export function slotHistory(locationId: string, day: number, time: string) {
   return FORMATS.filter((f) => formatAllowed(locationId, f))
     .flatMap((f) =>
       BASE_TRAINERS.filter((t) => t.active && t.certs[f.cert] && t.access[locationId]).map((t) => {
-        const h = historicFor(locationId, day, time, f.name, t.id);
+        const h = historicFor(locationId, day, time, f.name, t.name);
         const sc = scoreCombo(h, t, { ai: { weightCheckin: 0.55, weightFill: 0.3, weightTrend: 0.05, weightTier: 0.1, preferTier1: true, enforceAmPm: true, allowParallel: true, autoPinHigh: true, useAiPass: true, openaiKey: "", openaiModel: "" } } as Settings, f.name);
         return { name: f.name, trainerId: t.id, checkin: h.checkin, fill: h.fill, sessions: h.sessions, score: sc.score, oneOff: sc.oneOff };
       })
@@ -485,7 +484,9 @@ function canUseTrainer(
   if ((book.dayCount[dayKey] ?? 0) >= access.maxPerDay + (opts.relaxSoft ? 1 : 0)) return "day-class-cap";
   const limits = limitsOf(settings);
   if ((book.hours[dayKey] ?? 0) + duration / 60 > limits.dailyHourCap) return "day-hour-cap";
-  if ((book.weekHours[t.id] ?? 0) + duration / 60 > limits.weeklyCap + (opts.relaxSoft ? 2 : 0)) return "week-cap";
+  // Hard cap, no relaxSoft grace — 15h/week across every location is an absolute ceiling, not a
+  // preference a fallback pass is allowed to trade away to fill a gap.
+  if ((book.weekHours[t.id] ?? 0) + duration / 60 > limits.weeklyCap) return "week-cap";
   // A trainer can't be in two classes whose time windows overlap, even if they don't share a start time.
   if (overlapsAny(book.trainerIntervals[dayKey], tm, tm + duration)) return "overlap";
   const sh = shiftOf(time);
@@ -612,7 +613,7 @@ function makeSession(
   settings: Settings,
   extra: Tag[] = []
 ): Session {
-  const h = historicForFast(locationId, day, time, format.name, trainer.id);
+  const h = historicForFast(locationId, day, time, format.name, trainer.name);
   const scored = scoreCombo(h, trainer, settings, format.name);
   scored.score = applyOverrideBoost(scored.score, locationId, day, time, format.name, trainer.id);
   const tags: Tag[] = [...extra];
@@ -620,7 +621,7 @@ function makeSession(
   if (scored.score >= 84) tags.push("evidence");
   if (trainer.tier === 1 && scored.score >= 78) tags.push("best");
   if (format.family === "barre") tags.push("mix");
-  if (h.fill < settings.quality.fillFloor + 8) tags.push("low");
+  if (h.fill < settings.quality.fillFloor + 15) tags.push("low"); // watch band scales with the floor, not a fixed absolute gap
   // Reason text must say exactly what evidence was used \u2014 never phrase a broad fallback aggregate as if it were slot-specific.
   const tierText: Record<string, string> = {
     exact: `at ${time} on ${DAYS[day].full}`,
@@ -685,7 +686,7 @@ export function refreshSessionMetrics(sessions: Session[], settings: Settings) {
       if (scored.score >= 80) tags.push("historic");
       if (scored.score >= 84) tags.push("evidence");
       if (trainer.tier === 1 && scored.score >= 78) tags.push("best");
-      if (h.fill < settings.quality.fillFloor + 8) tags.push("low");
+      if (h.fill < settings.quality.fillFloor + 15) tags.push("low"); // watch band scales with the floor, not a fixed absolute gap
     }
     return {
       ...session,
@@ -765,14 +766,20 @@ function pickCandidate(
         continue;
       }
 	      if (hardRuleBlocks(settings, locationId, day, time, format.name, trainer.id)) continue;
-	      const h = historicForFast(locationId, day, time, format.name, trainer.id);
+	      const h = historicForFast(locationId, day, time, format.name, trainer.name);
 	      const zeroHistory = hasPerformance() && h.sessions === 0;
 	      // A slot/trainer combo with no history at all can only be used to fill out class-mix
 	      // variety or genuine experiments — gated by the caller's 15% quota (see opts.allowExperimental).
 	      if (zeroHistory && (!relaxed || !opts.allowExperimental)) continue;
 	      if (!relaxed && !zeroHistory) {
 	        if (hasPerformance() && h.sessions < 4) continue;
-        const passesQualityFloor = h.fill >= settings.quality.fillFloor && (h.checkin >= settings.quality.checkinFloor || isSpecialtyCapacityFormat(format.name));
+        // Clearing either bar is enough — a packed 13-seat room reads as a strong slot even with a
+        // modest headcount, and a big room with a strong average check-in is strong even at a
+        // middling fill%. Capacity-capped rooms (cycle/strength) judge on fill alone: their checkin
+        // count is mechanically ceilinged by the tiny room, so it can never be the qualifying signal.
+        const passesQualityFloor = isSpecialtyCapacityFormat(format.name)
+          ? h.fill >= settings.quality.fillFloor
+          : h.fill >= settings.quality.fillFloor || h.checkin >= settings.quality.checkinFloor;
         if (!passesQualityFloor) continue;
 	      }
 	      const scored = scoreCombo(h, trainer, settings, format.name);
@@ -1087,6 +1094,46 @@ function repairShiftRatios(sessions: Session[], book: Book, settings: Settings, 
   return added;
 }
 
+// Every earlier repair pass optimizes for hitting day/week counts, which can pad a location up to
+// its ceiling with sessions that individually squeak past the per-slot floor but drag the location's
+// average down well below the 50%-fill / 6-checkin bar the engine is meant to aim for. This pass
+// enforces that bar directly on the final schedule: while a location's average is below BOTH
+// thresholds, it removes the single weakest non-pinned, non-protected session and re-checks — fewer,
+// stronger classes beat a full grid of filler. It never cuts below the location's weekly floor,
+// since that is a separate hard requirement; if the two conflict, the floor wins and the location is
+// left reporting a quality violation instead of an emptied schedule.
+function repairLocationQuality(sessions: Session[], settings: Settings, rand: () => number) {
+  let removed = 0;
+  for (const loc of houses(settings)) {
+    const floor = settings.floors?.[loc.id] ?? loc.weeklyFloor;
+    // A location whose real evidence just can't clear the quality bar (Courtside's single trainer,
+    // for instance) prunes all the way down to this same floor on every single run, so every
+    // generation looked identical for that house no matter the seed. Landing on a random point a
+    // little above the floor — never below it — keeps the "aim for the bar" behavior while restoring
+    // the run-to-run variety a fresh seed is supposed to produce.
+    const stopAt = floor + Math.floor(rand() * 4);
+    let guard = 0;
+    while (guard < 300) {
+      guard += 1;
+      const list = sessions.filter((s) => s.locationId === loc.id);
+      if (list.length <= stopAt) break;
+      const avgFill = list.reduce((a, s) => a + s.fill, 0) / list.length;
+      const avgCheckin = list.reduce((a, s) => a + s.avg, 0) / list.length;
+      if (avgFill > settings.quality.fillFloor || avgCheckin > settings.quality.checkinFloor) break;
+      const victims = list.filter((s) => !s.pinned && !s.tags.includes("protected"));
+      if (!victims.length) break;
+      // Weakest on whichever of the two metrics the location actually needs — a session that's
+      // terrible on both goes first.
+      victims.sort((a, b) => a.fill / settings.quality.fillFloor + a.avg / settings.quality.checkinFloor - (b.fill / settings.quality.fillFloor + b.avg / settings.quality.checkinFloor));
+      const idx = sessions.findIndex((s) => s.id === victims[0].id);
+      if (idx < 0) break;
+      sessions.splice(idx, 1);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
 function repairCompliance(sessions: Session[], settings: Settings, rand: () => number) {
   let book = rebuildBook(sessions, settings);
   let changes = 0;
@@ -1107,13 +1154,29 @@ function repairCompliance(sessions: Session[], settings: Settings, rand: () => n
   // Run last as well: the target/parallel/ratio passes above all add classes to weekdays, which can
   // quietly push a weekday past Saturday after the first Saturday pass has already finished.
   changes += repairSaturdayPriority(sessions, book, settings, rand);
+  // Absolute last word: prune toward the fill/check-in quality bar after every other pass has
+  // finished adding classes, so nothing re-pads the count back up with weak filler afterward.
+  changes += repairLocationQuality(sessions, settings, rand);
   return { changes, book: rebuildBook(sessions, settings) };
 }
 
-function generateOnce(settings: Settings, seed: number, optimize: boolean) {
+function generateOnce(settings: Settings, seed: number, optimize: boolean, external: Session[] = []) {
   const rand = rng(seed);
   const book = emptyBook();
   const sessions: Session[] = [];
+
+  // A scoped regeneration (only some locations) never touches these sessions, but their trainers'
+  // day/week hours are real commitments that still count — without this, a trainer shared between a
+  // scoped and an untouched house could get booked into fresh hours here with zero visibility into
+  // what they're already carrying elsewhere, blowing past the 15h/week cap once the two halves are
+  // merged back together. Marked pinned so no repair pass can touch or remove them; stripped back out
+  // of the final result in generateSchedule.
+  for (const s of external) {
+    const trainer = roster(settings).find((t) => t.id === s.trainerId);
+    if (!trainer) continue;
+    commit(book, trainer, s.locationId, s.day, s.time, s.duration, s.name, s.studio);
+    sessions.push({ ...s, pinned: true });
+  }
 
   for (const pin of settings.pins.filter((p) => p.enabled)) {
     const format = catalog(settings).find((f) => f.name === pin.className);
@@ -1293,12 +1356,22 @@ function evaluate(sessions: Session[], settings: Settings, seed: number, trial: 
       if (d.key === 6 && list.some((s) => s.day === 6 && toMin(s.time) < toMin("10:00"))) violations.push("Sunday class before 10:00");
     });
     const avgScore = list.reduce((a, s) => a + s.score, 0) / (list.length || 1);
+    const avgFill = list.reduce((a, s) => a + s.fill, 0) / (list.length || 1);
+    const avgCheckin = list.reduce((a, s) => a + s.avg, 0) / (list.length || 1);
+    // Clearing either bar counts — see repairLocationQuality, which prunes toward this same target.
+    const qualityMet = list.length > 0 && (avgFill > settings.quality.fillFloor || avgCheckin > settings.quality.checkinFloor);
+    if (list.length > 0 && !qualityMet) {
+      violations.push(`Below quality target: ${avgFill.toFixed(1)}% fill / ${avgCheckin.toFixed(1)} avg check-in (need >${settings.quality.fillFloor}% or >${settings.quality.checkinFloor})`);
+    }
     return {
       id: loc.id,
       count: list.length,
       floor,
       floorMet: list.length >= floor,
       avgScore: Number(avgScore.toFixed(1)),
+      avgFill: Number(avgFill.toFixed(1)),
+      avgCheckin: Number(avgCheckin.toFixed(1)),
+      qualityMet,
       barreShare: Number((share * 100).toFixed(1)),
       violations,
     };
@@ -1314,6 +1387,9 @@ function evaluate(sessions: Session[], settings: Settings, seed: number, trial: 
   }
   notes.push(settings.ai.enforceAmPm ? "AM/PM split enforced." : "AM/PM split off.");
   notes.push(`Quality gate ${settings.quality.checkinFloor} check-ins / ${settings.quality.fillFloor}% fill.`);
+  if (!hasPerformance()) {
+    notes.unshift("No source-sheet history was loaded for this run — every placement is a blind guess and must be regenerated once real data is available.");
+  }
   const blob = sessions.map((s) => `${s.locationId}${s.day}${s.time}${s.name}${s.trainerId}`).join("|");
   return {
     seed,
@@ -1324,6 +1400,7 @@ function evaluate(sessions: Session[], settings: Settings, seed: number, trial: 
     locations,
     notes,
     weekOffs,
+    usedPerformanceData: hasPerformance(),
   };
 }
 
@@ -1395,7 +1472,7 @@ function refineSessions(sessions: Session[], book: Book, settings: Settings, ran
     for (const trainer of candidates) {
       if (canUseTrainer(trainer, s.locationId, s.day, s.time, format.duration, format, settings, book)) continue;
       if (hardRuleBlocks(settings, s.locationId, s.day, s.time, s.name, trainer.id)) continue;
-      const h = historicForFast(s.locationId, s.day, s.time, s.name, trainer.id);
+      const h = historicForFast(s.locationId, s.day, s.time, s.name, trainer.name);
       const scored = scoreCombo(h, trainer, settings, s.name);
       const score = applyOverrideBoost(scored.score, s.locationId, s.day, s.time, s.name, trainer.id);
       if (score > s.score + 4 && (!bestAlt || score > bestAlt.score)) bestAlt = { trainer, score, h };
@@ -1418,13 +1495,17 @@ function refineSessions(sessions: Session[], book: Book, settings: Settings, ran
 // locationIds, when given, scopes generation to just those houses — every internal pass reads
 // its location list through houses(settings), so swapping settings.locations to the subset is
 // enough; callers merge the returned sessions back with their untouched other-location sessions.
-export function generateSchedule(settings: Settings, seed: number, optimize = false, locationIds?: string[]) {
+// existingElsewhere should be exactly those untouched other-location sessions — a shared trainer's
+// hours/day caps otherwise get checked against this scope alone, letting the two halves add up to
+// more than 15h/week once the caller merges them back together (see generateOnce).
+export function generateSchedule(settings: Settings, seed: number, optimize = false, locationIds?: string[], existingElsewhere: Session[] = []) {
   if ((globalThis as any).DEBUG_ENGINE) {
     console.log("gen-settings-locations", JSON.stringify(settings.locations?.find((l) => l.id === "kwality")));
   }
   const scoped: Settings = locationIds?.length
     ? { ...settings, locations: houses(settings).filter((l) => locationIds.includes(l.id)) }
     : settings;
+  const external = locationIds?.length ? existingElsewhere : [];
   const trials = optimize || settings.ai.useAiPass ? 5 : 3;
   historicCache = new Map();
   try {
@@ -1433,7 +1514,7 @@ export function generateSchedule(settings: Settings, seed: number, optimize = fa
     let bestFit = -Infinity;
     let picked = 0;
     for (let i = 0; i < trials; i++) {
-      const out = generateOnce(scoped, seed + i * 9973, optimize);
+      const out = generateOnce(scoped, seed + i * 9973, optimize, external);
       const repaired = repairCompliance(out.sessions, scoped, rng(seed + i * 9973 + 313));
       out.book = repaired.book;
       const report = evaluate(out.sessions, settings, seed, i + 1, trials);
@@ -1445,11 +1526,14 @@ export function generateSchedule(settings: Settings, seed: number, optimize = fa
         picked = i + 1;
       }
     }
-    const sessions = best?.sessions ?? [];
+    let sessions = best?.sessions ?? [];
     if (best) {
       refineSessions(sessions, best.book, settings, rng(seed + 777));
       best.book = repairCompliance(sessions, scoped, rng(seed + 991)).book;
     }
+    // Strip the external sessions back out — they were only ever along for the ride so their
+    // trainers' hours got counted; the caller already has them and would otherwise get duplicates.
+    if (locationIds?.length) sessions = sessions.filter((s) => locationIds.includes(s.locationId));
     const report = bestReport
       ? { ...evaluate(sessions, settings, seed, picked, trials), pickedTrial: picked }
       : evaluate(sessions, settings, seed, 1, trials);
@@ -1469,18 +1553,27 @@ export function complianceFor(sessions: Session[], settings: Settings) {
 export function hasConflict(
   sessions: Session[],
   candidate: { id: string; locationId: string; day: number; time: string; trainerId: string; studio: string; duration?: number },
-  excludeId?: string
+  excludeId?: string,
+  weeklyCapHours = FALLBACK_LIMITS.weeklyCap
 ): string | null {
   const start = toMin(candidate.time);
   const end = start + (candidate.duration ?? 60);
+  let weekHours = (candidate.duration ?? 60) / 60;
   for (const s of sessions) {
     if (s.id === (excludeId ?? candidate.id)) continue;
+    if (s.trainerId === candidate.trainerId) weekHours += s.duration / 60;
     if (s.day !== candidate.day) continue;
     const sStart = toMin(s.time);
     const sEnd = sStart + s.duration;
     if (start >= sEnd || end <= sStart) continue;
     if (s.trainerId === candidate.trainerId) return `${trainerById_(s.trainerId)} is already teaching ${s.time}\u2013${DAYS[candidate.day].full} then, overlapping ${candidate.time}.`;
     if (s.locationId === candidate.locationId && s.studio === candidate.studio) return `${candidate.studio} is already booked from ${s.time} on ${DAYS[candidate.day].full}, overlapping ${candidate.time}.`;
+  }
+  // Same hard 15h/week ceiling the generator enforces, applied to manual drag/drop, paste, and
+  // chatbot edits too \u2014 a trainer can't be pushed over the cap just because a human made the move
+  // instead of the AI.
+  if (weekHours > weeklyCapHours) {
+    return `${trainerById_(candidate.trainerId)} would be at ${weekHours.toFixed(1)}h this week, over the ${weeklyCapHours}h cap.`;
   }
   return null;
 }

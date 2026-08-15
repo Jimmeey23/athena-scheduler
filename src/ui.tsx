@@ -1,6 +1,6 @@
 import { useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Copy, Pin, PinOff, Search, Trash2, UserRound } from "lucide-react";
+import { Check, ChevronDown, Copy, Pin, PinOff, Search, Trash2, UserRound } from "lucide-react";
 import { DAYS, TAG_META, TRAINERS, trainerById, trainerLoad } from "./data";
 import { slotHistory } from "./engine";
 import type { Session, Tag } from "./types";
@@ -335,25 +335,51 @@ export function MultiSelect({
 }) {
   const { triggerRef, open, pos, toggle, close } = usePortalPanel<HTMLButtonElement>();
   const toggleValue = (value: string) => onChange(selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value]);
-  const label = selected.length ? options.filter((o) => selected.includes(o.value)).map((o) => o.label).join(", ") : placeholder;
+  const allOn = options.length > 0 && options.every((o) => selected.includes(o.value));
+  const label = selected.length ? (selected.length === options.length ? `All (${selected.length})` : `${selected.length} selected`) : placeholder;
   return (
     <>
       <button
         ref={triggerRef}
         type="button"
         onClick={toggle}
-        className={`truncate rounded-lg border border-line bg-white px-2 py-1 text-left text-[11px] text-ivory ${className}`}
+        className={`flex items-center justify-between gap-1.5 truncate rounded-lg border border-line bg-white px-2 py-1 text-left text-[11px] text-ivory transition hover:border-[#005eed]/40 ${className}`}
       >
-        {label}
+        <span className="truncate">{label}</span>
+        <ChevronDown className={`h-3 w-3 shrink-0 text-mist transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && pos && (
         <PortalPanel pos={pos} onClose={close}>
-          {options.map((o) => (
-            <label key={o.value} className="flex items-center gap-2 rounded-lg px-2 py-1 text-xs hover:bg-ink">
-              <input type="checkbox" checked={selected.includes(o.value)} onChange={() => toggleValue(o.value)} />
-              {o.label}
-            </label>
-          ))}
+          <div className="sticky -top-2 z-10 -mx-2 -mt-2 mb-1 flex items-center justify-between gap-2 border-b border-line bg-white px-2 py-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-mist">
+              {selected.length}/{options.length}
+            </span>
+            <div className="flex gap-2 text-[10px] font-medium">
+              <button type="button" className="text-[#005eed] hover:underline disabled:cursor-default disabled:text-line disabled:no-underline" disabled={allOn} onClick={() => onChange(options.map((o) => o.value))}>
+                Select all
+              </button>
+              <button type="button" className="text-mist hover:underline disabled:cursor-default disabled:text-line disabled:no-underline" disabled={!selected.length} onClick={() => onChange([])}>
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="space-y-0.5">
+            {options.map((o) => {
+              const on = selected.includes(o.value);
+              return (
+                <label key={o.value} className={`flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition ${on ? "bg-[#005eed]/[0.08]" : "hover:bg-ink"}`}>
+                  <span
+                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded ${on ? "bg-[#005eed] text-white" : "border border-line bg-white"}`}
+                  >
+                    {on && <Check className="h-3 w-3" strokeWidth={3} />}
+                  </span>
+                  <input type="checkbox" checked={on} onChange={() => toggleValue(o.value)} className="sr-only" />
+                  <span className="truncate">{o.label}</span>
+                </label>
+              );
+            })}
+            {!options.length && <p className="px-2 py-1.5 text-xs text-mist">No options.</p>}
+          </div>
         </PortalPanel>
       )}
     </>

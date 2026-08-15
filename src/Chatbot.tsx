@@ -173,7 +173,7 @@ function findFormat(text: string) {
 }
 
 function buildSession(house: string, day: number, time: string, format: (typeof FORMATS)[number], trainer: (typeof TRAINERS)[number], settings: Settings): Session {
-  const h = historicFor(house, day, time, format.name, trainer.id);
+  const h = historicFor(house, day, time, format.name, trainer.name);
   const sc = scoreCombo(h, trainer, settings, format.name);
   return {
     id: `${house}-${day}-${time}-${format.name}-${trainer.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -313,7 +313,7 @@ function toolAddSession(working: Session[], settings: Settings, fallbackLoc: str
   const trainer = args.trainer ? findTrainer((args.trainer || "").toLowerCase()) : eligibleTrainer(format, loc, day, settings);
   if (!trainer) return { working, result: `error: no eligible trainer found for ${format.name} at that house/day` };
   const room = loc === "supreme" && format.family === "cycle" ? "Studio 2" : format.studio;
-  const conflict = hasConflict(working, { id: "new-pending", locationId: loc, day, time, trainerId: trainer.id, studio: room, duration: format.duration });
+  const conflict = hasConflict(working, { id: "new-pending", locationId: loc, day, time, trainerId: trainer.id, studio: room, duration: format.duration }, undefined, settings.limits.weeklyCap);
   if (conflict) return { working, result: `error: conflict — ${conflict}` };
   const s = buildSession(loc, day, time, format, trainer, settings);
   s.studio = room;
@@ -376,7 +376,7 @@ function toolRescheduleSession(working: Session[], settings: Settings, fallbackL
     const timeVal = newTime || s.time;
     const locVal = newLoc || s.locationId;
     const room = locVal === "supreme" && fmt.family === "cycle" ? "Studio 2" : fmt.studio;
-    const conflict = hasConflict(working, { id: s.id, locationId: locVal, day: dayVal, time: timeVal, trainerId: trn.id, studio: room, duration: fmt.duration }, s.id);
+    const conflict = hasConflict(working, { id: s.id, locationId: locVal, day: dayVal, time: timeVal, trainerId: trn.id, studio: room, duration: fmt.duration }, s.id, settings.limits.weeklyCap);
     if (conflict) {
       skipped.push(`${DAYS[s.day].label} ${s.time} (${conflict})`);
       return s;

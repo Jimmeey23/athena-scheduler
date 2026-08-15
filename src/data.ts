@@ -3,15 +3,38 @@ import type { CertKey, Format, Location, Session, Tag, Trainer } from "./types";
 const REPO = "https://raw.githubusercontent.com/Jimmeey23/make-my-schedule/codex/dynamic-schedule-counts/web/images";
 const photo = (file: string) => `${REPO}/${encodeURIComponent(file)}`;
 
+// key/label/full are fixed weekday identifiers used throughout scheduling logic (targets, mix
+// bands, trainer access days) and must stay static. The calendar date and "is this today" flag are
+// week-relative, not weekday-relative — use daysWithDates() below to get those live instead of
+// baking in one specific week's dates.
 export const DAYS = [
-  { key: 0, label: "Mon", date: "10 Aug", full: "Monday" },
-  { key: 1, label: "Tue", date: "11 Aug", full: "Tuesday" },
-  { key: 2, label: "Wed", date: "12 Aug", full: "Wednesday" },
-  { key: 3, label: "Thu", date: "13 Aug", full: "Thursday" },
-  { key: 4, label: "Fri", date: "14 Aug", full: "Friday", today: true },
-  { key: 5, label: "Sat", date: "15 Aug", full: "Saturday" },
-  { key: 6, label: "Sun", date: "16 Aug", full: "Sunday" },
+  { key: 0, label: "Mon", full: "Monday" },
+  { key: 1, label: "Tue", full: "Tuesday" },
+  { key: 2, label: "Wed", full: "Wednesday" },
+  { key: 3, label: "Thu", full: "Thursday" },
+  { key: 4, label: "Fri", full: "Friday" },
+  { key: 5, label: "Sat", full: "Saturday" },
+  { key: 6, label: "Sun", full: "Sunday" },
 ];
+
+function isSameDay(a: Date, b: Date) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+// Attaches the real calendar date (and whether that date is today) to each weekday, for whichever
+// Monday-start week is currently displayed.
+export function daysWithDates(weekStart: Date) {
+  const now = new Date();
+  return DAYS.map((d) => {
+    const date = new Date(weekStart);
+    date.setDate(date.getDate() + d.key);
+    return {
+      ...d,
+      date: date.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }),
+      today: isSameDay(date, now),
+    };
+  });
+}
 
 export const TIMES = [
   "07:15",
@@ -48,8 +71,8 @@ export const TIMES = [
 export const LOCATIONS: Location[] = [
   {
     id: "kwality",
-    name: "Kwality House",
-    area: "Kemp's Corner",
+    name: "Kwality House, Kemps Corner",
+    area: "Mumbai",
     rooms: ["Studio 1", "Studio 2", "PowerCycle Studio", "Strength Lab"],
     accent: "#005eed",
     weeklyFloor: 70,
@@ -59,8 +82,8 @@ export const LOCATIONS: Location[] = [
   },
   {
     id: "supreme",
-    name: "Supreme HQ",
-    area: "Bandra West",
+    name: "Supreme HQ, Bandra",
+    area: "Bandra West, Mumbai",
     rooms: ["Studio 1", "Studio 2", "PowerCycle Studio"],
     accent: "#0e1729",
     weeklyFloor: 65,
@@ -71,31 +94,31 @@ export const LOCATIONS: Location[] = [
   {
     id: "kenkere",
     name: "Kenkere House",
-    area: "Juhu",
-    rooms: ["Studio 1", "Studio 2", "Studio 3"],
+    area: "Lavelle Road, Bengaluru",
+    rooms: ["Studio 1", "Studio 2"],
     accent: "#0e1729",
     weeklyFloor: 55,
-    aliases: ["kenkere", "juhu"],
-    roomCapacity: { "Studio 1": 13, "Studio 2": 13, "Studio 3": 13 },
+    aliases: ["kenkere", "bengaluru", "bangalore", "lavelle road"],
+    roomCapacity: { "Studio 1": 13, "Studio 2": 13 },
   },
   {
     id: "courtside",
     name: "Courtside",
-    area: "Lower Parel",
+    area: "Worli, Mumbai",
     rooms: ["Studio 1"],
     accent: "#005eed",
     weeklyFloor: 6,
-    aliases: ["courtside", "court", "lower parel"],
+    aliases: ["courtside", "court", "worli", "worli sea face", "worli seaface"],
     roomCapacity: { "Studio 1": 13 },
   },
   {
     id: "copper",
     name: "Copper & Cloves",
-    area: "Colaba",
+    area: "Indiranagar, Bengaluru",
     rooms: ["Studio 1"],
     accent: "#005eed",
     weeklyFloor: 9,
-    aliases: ["copper", "cloves", "colaba", "copper & cloves", "copper and cloves"],
+    aliases: ["copper", "cloves", "indiranagar", "copper & cloves", "copper and cloves"],
     roomCapacity: { "Studio 1": 13 },
   },
 ];
@@ -154,14 +177,14 @@ export const TRAINERS: Trainer[] = [
   { id: "richard", name: "Richard D'Costa", photo: photo("011-Richard-Image-3.jpg"), specialty: "FIT · Strength", tier: 1, active: true, certs: certs(["fit", "strength", "barre", "mat", "cardio"]), access: { kwality: loc([1, 3, 4, 5, 6], [], 3, 5.6), supreme: loc([1, 3, 4, 5, 6], [], 3, 6.0) } },
   { id: "rohan", name: "Rohan Dahima", photo: photo("012-Rohan-Image-3.jpg"), specialty: "Cycle · Barre", tier: 1, active: true, certs: certs(["barre", "mat", "cycle", "fit", "cardio", "hiit", "amped", "strength", "bbb", "recovery"]), access: { kwality: loc([0, 1, 2, 3, 4, 5, 6], [1], 4, 6.8), supreme: loc([0, 2, 4, 5, 6], [1], 3, 6.2) } },
   { id: "shruti", name: "Shruti Kulkarni", photo: photo("014-Shruti-Kulkarni.jpeg"), specialty: "Mat · FIT", tier: 1, active: true, certs: certs(["barre", "mat", "fit", "cardio", "recovery", "bbb"]), access: { kenkere: loc([0, 2, 3, 5, 6], [1, 4], 3, 5.0), copper: loc([0, 3, 5, 6], [1], 2, 4.7) } },
-  { id: "chaitanya", name: "Chaitanya Nahar", photo: "/images/chaitanya.jpg", specialty: "Barre · Mat", tier: 2, active: true, certs: certs(["barre", "mat", "cardio", "fit", "recovery"]), access: { kenkere: loc([0, 1, 2, 3, 4, 5, 6], [1], 3, 4.5), copper: loc([0, 1, 2, 3, 4, 5, 6], [1], 2, 4.3) } },
-  { id: "siddharth", name: "Siddharth Kasuma", photo: "/images/siddharth.jpg", specialty: "Barre · Mat", tier: 2, active: true, certs: certs(["barre", "mat"]), access: { kenkere: loc([0, 1, 2, 3, 4, 5, 6], [2], 3, 4.5), copper: loc([0, 1, 2, 3, 4, 5, 6], [2], 2, 4.3) } },
+  { id: "chaitanya", name: "Chaitanya Nahar", photo: "/images/chaitanya.jpg", specialty: "Barre · Mat", tier: 1, active: true, certs: certs(["barre", "mat", "cardio", "fit", "recovery"]), access: { kenkere: loc([0, 1, 2, 3, 4, 5, 6], [1], 3, 4.5), copper: loc([0, 1, 2, 3, 4, 5, 6], [1], 2, 4.3) } },
+  { id: "siddharth", name: "Siddharth Kasuma", photo: "/images/siddharth.jpg", specialty: "Barre · Mat", tier: 1, active: true, certs: certs(["barre", "mat"]), access: { kenkere: loc([0, 1, 2, 3, 4, 5, 6], [2], 3, 4.5), copper: loc([0, 1, 2, 3, 4, 5, 6], [2], 2, 4.3) } },
   { id: "vivaran", name: "Vivaran Dhasmana", photo: photo("015-Vivaran-Image-4.jpg"), specialty: "PowerCycle", tier: 1, active: true, certs: certs(["cycle", "mat", "barre", "cardio", "amped", "bbb", "fit", "strength", "recovery"]), access: { kwality: loc([0, 2, 4, 5], [1, 6], 3, 5.5), supreme: loc([0, 2, 4, 5], [1, 6], 3, 5.8) } },
   { id: "karanvir", name: "Karanvir Bhatia", photo: photo("Karanvir.jpg"), specialty: "PowerCycle", tier: 1, active: true, certs: certs(["barre", "mat", "cycle", "cardio", "recovery", "bbb", "fit"]), access: { kwality: loc([0, 1, 2, 3, 5, 6], [4], 4, 6.0), supreme: loc([0, 1, 3, 5, 6], [4], 3, 6.3) } },
-  { id: "anmol", name: "Anmol Sharma", photo: photo("Anmol.jpeg"), specialty: "PowerCycle", tier: 2, active: true, certs: certs(["cycle", "barre", "cardio", "mat", "strength"]), access: { kwality: loc([0, 2, 3, 5, 6], [1, 4], 2, 3.0), supreme: loc([0, 2, 3, 5, 6], [1, 4], 2, 2.9) } },
-  { id: "bret", name: "Bret Saldanha", photo: photo("Bret.jpeg"), specialty: "PowerCycle", tier: 2, active: true, certs: certs(["cycle", "barre"]), access: { kwality: loc([0, 1, 4, 5, 6], [2, 3], 2, 3.2), supreme: loc([0, 1, 5, 6], [2, 3], 2, 3.0) } },
+  { id: "anmol", name: "Anmol Sharma", photo: photo("Anmol.jpeg"), specialty: "PowerCycle", tier: 1, active: true, certs: certs(["cycle", "barre", "cardio", "mat", "strength"]), access: { kwality: loc([0, 2, 3, 5, 6], [1, 4], 2, 3.0), supreme: loc([0, 2, 3, 5, 6], [1, 4], 2, 2.9) } },
+  { id: "bret", name: "Bret Saldanha", photo: photo("Bret.jpeg"), specialty: "PowerCycle", tier: 1, active: true, certs: certs(["cycle", "barre"]), access: { kwality: loc([0, 1, 4, 5, 6], [2, 3], 2, 3.2), supreme: loc([0, 1, 5, 6], [2, 3], 2, 3.0) } },
   { id: "simonelle", name: "Simonelle De Vitre", photo: photo("Simonelle.jpeg"), specialty: "Cycle · Mat", tier: 2, active: true, certs: certs(["cycle", "mat", "barre", "cardio", "recovery"]), access: { kwality: loc([3, 5, 6], [0, 1], 2, 5.1), supreme: loc([3, 5, 6], [0, 1], 2, 4.9) } },
-  { id: "raunak", name: "Raunak Khemuka", photo: photo("Raunak.jpeg"), specialty: "Cycle", tier: 3, active: true, certs: certs(["cycle"]), access: { kwality: loc([5, 6], [1, 2], 1, 3.1), supreme: loc([5, 6], [1, 2], 1, 3.0) } },
+  { id: "raunak", name: "Raunak Khemuka", photo: photo("Raunak.jpeg"), specialty: "Cycle", tier: 2, active: true, certs: certs(["cycle"]), access: { kwality: loc([5, 6], [1, 2], 1, 3.1), supreme: loc([5, 6], [1, 2], 1, 3.0) } },
 ];
 
 // Durations drive room/trainer overlap checks — must match reality exactly. Only Strength Lab,
@@ -185,10 +208,10 @@ export const FORMATS: Format[] = [
 ];
 
 export const FORMAT_PRIORITY: Record<string, string[]> = {
-  PowerCycle: ["vivaran", "cauveri", "karanvir"],
-  "PowerCycle Express": ["vivaran", "cauveri", "karanvir"],
-  "Strength Lab": ["atulan", "mrigakshi", "anisha", "reshma", "richard"],
-  FIT: ["atulan", "mrigakshi", "anisha", "reshma", "richard"],
+  PowerCycle: ["vivaran", "cauveri", "karanvir","bret","anmol","simonelle","raunak"],
+  "PowerCycle Express": ["vivaran", "cauveri", "karanvir","bret","anmol","simonelle","raunak"],
+  "Strength Lab": ["atulan", "mrigakshi", "anisha", "reshma", "richard","pranjali","karanvir"],
+  FIT: ["atulan", "mrigakshi", "anisha", "reshma", "richard","pranjali","karanvir"],
 };
 
 export type ClassLevel = "Beginner" | "Intermediate" | "Advanced";
@@ -202,7 +225,7 @@ export function levelOf(formatName: string): ClassLevel {
   return "Intermediate";
 }
 
-export const TIER1_PRIORITY = ["anisha", "rohan", "reshma", "atulan", "pranjali", "karanvir", "mrigakshi", "vivaran", "pushyank", "kajol", "shruti"];
+export const TIER1_PRIORITY = ["anisha", "rohan", "reshma", "atulan", "pranjali", "karanvir", "mrigakshi", "vivaran", "cauveri", "richard", "anmol", "pushyank", "kajol", "shruti"];
 
 export const TAG_META: Record<Tag, { label: string; cls: string }> = {
   mix: { label: "Mix balance", cls: "bg-sky-50 text-sky-800 ring-sky-200" },

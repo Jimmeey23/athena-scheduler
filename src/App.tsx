@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Building2,
@@ -41,7 +41,7 @@ import { SettingsView } from "./SettingsView";
 import { ClassModal } from "./ClassModal";
 import { CreateClassModal } from "./CreateClassModal";
 import { Chatbot } from "./Chatbot";
-import { hasPerformance, loadSnapshotCsv, setPerformanceRows } from "./performance";
+import { applyHistoricCerts, hasPerformance, loadSnapshotCsv, setPerformanceRows } from "./performance";
 import { loadCloud, persistCloud, persistSchedule, loadSchedule, finalizeSchedule } from "./supabase";
 import { recordOverride } from "./overrides";
 import { exportCSV, exportHTML, exportJSON, exportPDF, exportPNG } from "./export";import {
@@ -123,7 +123,19 @@ export default function App() {
       saveCurrentSchedule(first);
       return first;
     } catch {
-      return { sessions: [] as Session[], report: { seed: 0, hash: "boot", generatedAt: new Date().toISOString(), trials: 0, pickedTrial: 0, locations: [], notes: ["Booted without a draft"] } };
+      return {
+        sessions: [] as Session[],
+        report: {
+          seed: 0,
+          hash: "boot",
+          generatedAt: new Date().toISOString(),
+          trials: 0,
+          pickedTrial: 0,
+          locations: [],
+          notes: ["Booted without a draft"],
+          usedPerformanceData: false,
+        },
+      };
     }
   });
   const [aiOpen, setAiOpen] = useState(false);
@@ -139,47 +151,96 @@ export default function App() {
     pinned: number;
     variety: number;
     byFormat: Array<[string, number]>;
-    byTrainer: Array<[string, number]>;
+    byTrainer: Array<[string, number, number]>;
   }>(null);
 
-  useEffect(() => {
-    // Loads historic performance data only — must not silently reshuffle the displayed schedule.
-    loadSnapshotCsv()
-      .then((rows) => {
-        setPerformanceRows(rows);
-        setPerfCount(rows.length);
-        setBundle((b) => {
-          const refreshed = { ...b, sessions: refreshSessionMetrics(b.sessions, settings) };
-          saveCurrentSchedule(refreshed);
-          return refreshed;
-        });
-      })
-      .catch(() => setPerfCount(0));
-  }, [settings]);
+  // Gates the auto-save effect below until bootstrap has fully resolved, so it never mistakes a
+  // cloud fetch echoing its own value back at itself for a real user edit.
+  const autoSaveReady = useRef(false);
 
   useEffect(() => {
-    // Supabase is the cross-device source of truth for "the most recently generated schedule".
-    loadSchedule()
-      .then((cloud) => {
-        if (cloud) {
-          const next = hasPerformance() ? { ...cloud, sessions: refreshSessionMetrics(cloud.sessions, settings) } : cloud;
-          setBundle(next);
-          saveCurrentSchedule(next);
-        }
-      })
-      .catch(() => {
-        /* keep the local schedule */
+    // Single coordinated bootstrap, deliberately NOT split across effects keyed on `settings`.
+    // It used to be: one effect loaded the CSV and re-ran on every `settings` change (including the
+    // very settings changes it triggered itself, via the certs merge below); a second, independent
+    // effect loaded cloud settings and the cloud schedule. Cloud settings frequently arrived AFTER
+    // the CSV effect's first pass already regenerated the schedule from whatever `settings` existed
+    // at that moment (localStorage defaults, on a fresh browser) — and once a regeneration is marked
+    // `usedPerformanceData: true`, nothing forced a second one, so the schedule permanently reflected
+    // the wrong settings (missing trainers, wrong targets/mix) even though the metrics kept getting
+    // "refreshed" against the real data on top of it. That mismatch is exactly what let most of a
+    // schedule read "no matching history" while still being tagged as data-backed. Awaiting every
+    // source before deciding anything removes the race entirely: there is exactly one decision, made
+    // once, with the final settings and the final performance data both already in hand.
+    let cancelled = false;
+    (async () => {
+      const [cloudState, cloudBundle, perfRows] = await Promise.allSettled([loadCloud(), loadSchedule(), loadSnapshotCsv()]);
+      if (cancelled) return;
+
+      if (perfRows.status === "fulfilled") {
+        setPerformanceRows(perfRows.value);
+        setPerfCount(perfRows.value.length);
+      } else {
+        setPerfCount(0);
+      }
+
+      const cloudSettings = cloudState.status === "fulfilled" && cloudState.value?.settings ? normalizeSettings(cloudState.value.settings as Settings) : null;
+      if (cloudState.status === "fulfilled" && cloudState.value?.drafts?.length) setDrafts(cloudState.value.drafts);
+
+      // Final settings for this session: cloud copy if one exists, else whatever was already loaded
+      // locally — either way, certified from real session history now that it's loaded, additive
+      // only so a deliberate manual edit is never overwritten.
+      const finalSettings = (() => {
+        const base = cloudSettings ?? settings;
+        const roster = base.trainers?.length ? base.trainers : TRAINERS;
+        const next = applyHistoricCerts(roster);
+        return next === roster ? base : { ...base, trainers: next };
+      })();
+      setSettings(finalSettings);
+
+      const cloud = cloudBundle.status === "fulfilled" ? cloudBundle.value : null;
+      setBundle((b) => {
+        const current = cloud ?? b;
+        // Don't just trust `usedPerformanceData` — it only proves history had loaded by the time
+        // *some* generateSchedule call ran, not that this exact bundle is the product of one that
+        // used the final, correct settings. A schedule built under a still-resolving settings race
+        // (or one saved by an earlier bug) can carry the flag as true while most of its placements
+        // are still blind guesses — verify against the sessions themselves before trusting the flag.
+        const nonPinned = current.sessions.filter((s) => !s.pinned && !s.tags.includes("protected"));
+        const blindShare = nonPinned.length ? nonPinned.filter((s) => s.sessions === 0).length / nonPinned.length : 0;
+        const looksDataBacked = current.report?.usedPerformanceData && blindShare < 0.4;
+        const next = !hasPerformance()
+          ? current
+          : !looksDataBacked
+            ? generateSchedule(finalSettings, current.report?.seed ?? Date.now(), false)
+            : { ...current, sessions: refreshSessionMetrics(current.sessions, finalSettings) };
+        saveCurrentSchedule(next);
+        if (next !== current || cloud) persistSchedule(next);
+        return next;
       });
-    // Restores settings and the draft history from the shared Supabase state, if present.
-    loadCloud()
-      .then((cloud) => {
-        if (cloud?.settings) setSettings(normalizeSettings(cloud.settings as Settings));
-        if (cloud?.drafts?.length) setDrafts(cloud.drafts);
-      })
-      .catch(() => {
-        /* keep local settings/drafts */
-      });
+
+      // Only once every cloud source has actually resolved does a later `settings` change mean a
+      // real user edit — before this, it would just be bootstrap echoing its own fetch back at itself.
+      autoSaveReady.current = true;
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally runs once: this is a one-time bootstrap, not a response to `settings` changing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-persists every Settings-tab edit — including ones the user never clicks "Save" for — so a
+  // reload can never silently drop them. Debounced so a slider drag or a typed number doesn't fire a
+  // network call per keystroke; the explicit Save button in Settings still persists immediately via
+  // persistSettings() and shows its own toast.
+  useEffect(() => {
+    if (!autoSaveReady.current) return;
+    const timer = setTimeout(() => {
+      saveSettings(settings);
+      persistCloud({ settings });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [settings]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -210,12 +271,20 @@ export default function App() {
   const sessions = useMemo(() => all.filter((s) => s.locationId === locationId), [all, locationId]);
   const kpis = kpisFor(sessions, pinned);
   const loads = trainerLoad(sessions);
+  // Multi-Location view shows every house at once, so its workload panel must combine each
+  // trainer's hours/classes across all locations rather than just the currently-selected one.
+  const combinedLoads = useMemo(() => trainerLoad(all), [all]);
   const ticker = tickerItems(sessions, location.name);
   const selected = sessions.find((s) => s.id === selectedId) ?? all.find((s) => s.id === selectedId) ?? null;
 
   function persistSettings(next = settings) {
     saveSettings(next);
     setSettings(next);
+    // Must also reach Supabase: loadCloud() on the next mount (this device or another) overwrites
+    // local settings with whatever the cloud row holds, unconditionally. Without this, that row only
+    // ever got updated as a side effect of clicking Generate/Optimize, so a Settings-only edit would
+    // save locally, then get silently reverted by the next reload's stale cloud copy.
+    persistCloud({ settings: next });
     setToast("Control settings saved");
     setTimeout(() => setToast(null), 2200);
   }
@@ -232,10 +301,11 @@ export default function App() {
         const seed = (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0;
         const scoped = genLocationIds.length && genLocationIds.length < LOCATIONS.length ? genLocationIds : undefined;
         try {
-          const generated = generateSchedule(settings, seed, kind === "optimize", scoped);
-          const sessions = scoped
-            ? [...bundle.sessions.filter((s) => !scoped.includes(s.locationId)), ...generated.sessions]
-            : generated.sessions;
+          const untouched = scoped ? bundle.sessions.filter((s) => !scoped.includes(s.locationId)) : [];
+          // A trainer shared between a scoped house and one left untouched must have their existing
+          // hours there counted, or the two halves can add up to more than 15h/week once merged.
+          const generated = generateSchedule(settings, seed, kind === "optimize", scoped, untouched);
+          const sessions = scoped ? [...untouched, ...generated.sessions] : generated.sessions;
           const report = scoped ? complianceFor(sessions, settings) : generated.report;
           const next = { sessions, report };
           setBundle(next);
@@ -253,15 +323,23 @@ export default function App() {
           );
           const roster = settings.trainers?.length ? settings.trainers : TRAINERS;
           const pinnedCount = generated.sessions.filter((s) => s.tags.includes("protected")).length;
-          const varietyCount = generated.sessions.filter(
-            (s) => !s.tags.includes("protected") && (s.tags.includes("mix") || s.tags.includes("experimental") || s.tags.includes("constraint"))
-          ).length;
+          // "mix" is stamped on every barre-family session unconditionally (barre is the single
+          // biggest format group at every house) and "constraint" on every repair-pass addition —
+          // neither means the pick was weak, only why it was placed or added. Counting those as
+          // "not AI" made this read as ~0% AI on a perfectly healthy, evidence-backed schedule. The
+          // only tag that unambiguously means "no real evidence went into this" is "experimental"
+          // (a zero-history placement); "low" is just a watch flag on an accepted pick, not a sign
+          // it wasn't AI-driven, so it no longer counts against the AI bucket either.
+          const varietyCount = generated.sessions.filter((s) => !s.tags.includes("protected") && s.tags.includes("experimental")).length;
           const byFormat: Record<string, number> = {};
-          const byTrainer: Record<string, number> = {};
+          const byTrainer: Record<string, [number, number]> = {};
           for (const s of generated.sessions) {
             byFormat[s.name] = (byFormat[s.name] ?? 0) + 1;
             const trainerName = roster.find((t) => t.id === s.trainerId)?.name ?? s.trainerId;
-            byTrainer[trainerName] = (byTrainer[trainerName] ?? 0) + 1;
+            const row = byTrainer[trainerName] ?? [0, 0];
+            row[0] += 1;
+            row[1] += s.duration / 60;
+            byTrainer[trainerName] = row;
           }
           setGenSummary({
             total: generated.sessions.length,
@@ -269,7 +347,9 @@ export default function App() {
             variety: varietyCount,
             ai: generated.sessions.length - pinnedCount - varietyCount,
             byFormat: Object.entries(byFormat).sort((a, b) => b[1] - a[1]),
-            byTrainer: Object.entries(byTrainer).sort((a, b) => b[1] - a[1]),
+            byTrainer: Object.entries(byTrainer)
+              .map(([name, [count, hours]]) => [name, count, Number(hours.toFixed(1))] as [string, number, number])
+              .sort((a, b) => b[2] - a[2]),
           });
         } catch {
           setToast("Generation failed — check settings and try again");
@@ -347,7 +427,7 @@ export default function App() {
     const format = FORMATS.find((f) => f.name === opt.name);
     const trainer = TRAINERS.find((t) => t.id === opt.trainerId);
     if (!format || !trainer) return;
-    const h = historicFor(locationId, opt.day, opt.time, format.name, trainer.id);
+    const h = historicFor(locationId, opt.day, opt.time, format.name, trainer.name);
     const sc = scoreCombo(h, trainer, settings, format.name);
     const room = locationById(locationId).roomTypes?.[format.family] ?? format.studio;
     const capacity = locationById(locationId).roomCapacity?.[room] ?? 18;
@@ -378,13 +458,13 @@ export default function App() {
 
   function createClass(opts: { locationId: string; day: number; time: string; format: (typeof FORMATS)[number]; trainer: (typeof TRAINERS)[number]; recurring: boolean }) {
     const { locationId: loc, day, time, format, trainer, recurring } = opts;
-    const conflict = hasConflict(bundle.sessions, { id: "new", locationId: loc, day, time, trainerId: trainer.id, studio: format.studio, duration: format.duration });
+    const conflict = hasConflict(bundle.sessions, { id: "new", locationId: loc, day, time, trainerId: trainer.id, studio: format.studio, duration: format.duration }, undefined, settings.limits.weeklyCap);
     if (conflict) {
       setToast(conflict);
       setTimeout(() => setToast(null), 2600);
       return;
     }
-    const h = historicFor(loc, day, time, format.name, trainer.id);
+    const h = historicFor(loc, day, time, format.name, trainer.name);
     const sc = scoreCombo(h, trainer, settings, format.name);
     const room = locationById(loc).roomTypes?.[format.family] ?? format.studio;
     const capacity = locationById(loc).roomCapacity?.[room] ?? 18;
@@ -643,15 +723,20 @@ export default function App() {
             ))}
           </div>
 
-          {(view === "grid" || view === "trainer") && (
+          {(view === "grid" || view === "trainer" || view === "multi") && (
             <div className="px-4 pb-3 lg:px-6">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-[10px] uppercase tracking-[0.2em] text-mist">Trainer workload</p>
-                <p className="text-[11px] text-mist">{loads.length} on the floor</p>
+                <p className="text-[10px] uppercase tracking-[0.2em] text-mist">
+                  Trainer workload{view === "multi" ? " · all locations" : ""}
+                </p>
+                <p className="text-[11px] text-mist">{(view === "multi" ? combinedLoads : loads).length} on the floor</p>
               </div>
               <div className="hide-scroll flex gap-2 overflow-x-auto pb-1">
-                {loads.map((t) => {
+                {(view === "multi" ? combinedLoads : loads).map((t) => {
                   const active = focusTrainer === t.id;
+                  // In the combined view, a trainer's classes span more than one house — show how
+                  // many distinct locations their hours are spread across alongside the total.
+                  const locationCount = view === "multi" ? new Set(all.filter((s) => s.trainerId === t.id).map((s) => s.locationId)).size : 0;
                   return (
                     <button
                       key={t.id}
@@ -664,7 +749,10 @@ export default function App() {
                         <img src={t.photo} alt="" className="h-8 w-8 rounded-full object-cover" />
                         <div className="min-w-0">
                           <p className="truncate text-[12px] text-ivory">{t.name.split(" ")[0]}</p>
-                          <p className="text-[10px] text-mist">{t.hours}h · {t.classes}</p>
+                          <p className="text-[10px] text-mist">
+                            {t.hours}h · {t.classes}
+                            {locationCount > 1 ? ` · ${locationCount} houses` : ""}
+                          </p>
                         </div>
                       </div>
                       <div className="mt-2 h-1 overflow-hidden rounded-full bg-line">
@@ -690,6 +778,7 @@ export default function App() {
                 focusTrainer={focusTrainer}
                 query={query}
                 actions={actions}
+                weekStart={weekStart}
                 onAdd={(opt) => {
                   if (copied) {
                     setSessions([...bundle.sessions, { ...copied, id: `${copied.id}-copy-${Date.now()}`, day: opt.day, time: opt.time, locationId, reason: `Pasted from ${DAYS[copied.day].label} ${copied.time}` }]);
@@ -700,7 +789,7 @@ export default function App() {
                 onDropSession={(id, day, time) => {
                   const moving = bundle.sessions.find((s) => s.id === id);
                   if (!moving) return;
-                  const conflict = hasConflict(bundle.sessions, { ...moving, day, time }, id);
+                  const conflict = hasConflict(bundle.sessions, { ...moving, day, time }, id, settings.limits.weeklyCap);
                   if (conflict) {
                     setToast(conflict);
                     setTimeout(() => setToast(null), 2600);
@@ -716,7 +805,9 @@ export default function App() {
             {view === "timeline" && <TimelineView sessions={sessions} onSelect={onSelect} />}
             {view === "list" && <ListView sessions={sessions} pinned={pinned} onSelect={onSelect} />}
             {view === "trainer" && <TrainerView sessions={all} onSelect={onSelect} />}
-            {view === "multi" && <MultiView all={all} actions={actions} onOpenCreate={(loc, day, time) => setCreateFor({ locationId: loc, day, time })} />}
+            {view === "multi" && (
+              <MultiView all={all} actions={actions} focusTrainer={focusTrainer} onOpenCreate={(loc, day, time) => setCreateFor({ locationId: loc, day, time })} />
+            )}
             {view === "city" && <CityView all={all} actions={actions} onJump={(id) => { setLocationId(id); setView("grid"); }} />}
             {view === "heatmap" && <HeatmapView sessions={sessions} />}
             {view === "rooms" && <RoomsView sessions={sessions} all={all} actions={actions} />}
@@ -843,7 +934,7 @@ export default function App() {
                   key={c.trainer.id}
                   onClick={() => {
                     recordOverride(swapFor.locationId, swapFor.day, swapFor.time, swapFor.name, swapFor.trainerId, c.trainer.id);
-                    const h = historicFor(swapFor.locationId, swapFor.day, swapFor.time, swapFor.name, c.trainer.id);
+                    const h = historicFor(swapFor.locationId, swapFor.day, swapFor.time, swapFor.name, c.trainer.name);
                     const sc = scoreCombo(h, c.trainer, settings, swapFor.name);
                     setSessions(bundle.sessions.map((s) => (s.id === swapFor.id ? {
                       ...s,
@@ -971,7 +1062,7 @@ export default function App() {
                       const format = FORMATS.find((f) => f.name === h.name);
                       if (!format) return;
                       const trainer = TRAINERS.find((t) => t.id === h.trainerId);
-                      const hist = historicFor(similarFor.locationId, similarFor.day, similarFor.time, h.name, h.trainerId);
+                      const hist = historicFor(similarFor.locationId, similarFor.day, similarFor.time, h.name, trainer?.name ?? trainerById(h.trainerId).name);
                       const sc = trainer ? scoreCombo(hist, trainer, settings, h.name) : { score: h.score, oneOff: h.oneOff, breakdown: similarFor.breakdown };
                       const room = locationById(similarFor.locationId).roomTypes?.[format.family] ?? format.studio;
                       const capacity = locationById(similarFor.locationId).roomCapacity?.[room] ?? similarFor.capacity;
@@ -1095,15 +1186,20 @@ export default function App() {
                 </div>
               </div>
               <div>
-                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-mist">By trainer</p>
+                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-mist">By trainer · hours this week (15h cap)</p>
                 <div className="space-y-1.5">
-                  {genSummary.byTrainer.map(([name, count]) => (
+                  {genSummary.byTrainer.map(([name, count, hours]) => (
                     <div key={name} className="flex items-center gap-2 text-sm">
                       <span className="w-32 truncate">{name}</span>
                       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink">
-                        <div className="h-full rounded-full bg-[#0e1729]" style={{ width: `${(count / genSummary.total) * 100}%` }} />
+                        <div
+                          className={`h-full rounded-full ${hours > 15 ? "bg-rose-600" : "bg-[#0e1729]"}`}
+                          style={{ width: `${Math.min(100, (hours / 15) * 100)}%` }}
+                        />
                       </div>
-                      <span className="w-6 text-right tabular-nums text-mist">{count}</span>
+                      <span className={`w-20 text-right tabular-nums ${hours > 15 ? "font-semibold text-rose-600" : "text-mist"}`}>
+                        {hours}h · {count}
+                      </span>
                     </div>
                   ))}
                 </div>

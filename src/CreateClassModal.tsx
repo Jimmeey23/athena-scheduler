@@ -46,7 +46,7 @@ export function CreateClassModal({
     return roster
       .filter((tr) => tr.active)
       .map((tr) => {
-        const h = historicFor(loc, d, t, format?.name ?? "", tr.id);
+        const h = historicFor(loc, d, t, format?.name ?? "", tr.name);
         const scored = format ? scoreCombo(h, tr, settings, format.name) : { score: 0 };
         const hours = trainerWeekHours(all, tr.id);
         const certified = format ? tr.certs[format.cert] : true;

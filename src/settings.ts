@@ -50,15 +50,18 @@ export const DEFAULT_SETTINGS: Settings = {
     ]),
     // Courtside is staffed by Kajol alone, and her access days are Mon/Wed/Fri/Sat/Sun — Tuesday and
     // Thursday cannot be covered at all, so they carry a target of 0 instead of a permanent
-    // violation. Saturday absorbs the difference, which also keeps it the week's peak day.
+    // violation. Saturday absorbs the difference, which also keeps it the week's peak day. Max sits
+    // one class above target on every coverable day (rather than target === max) so there is real
+    // headroom for a run to land above the floor — target === max everywhere left zero room for the
+    // per-day wobble to have any effect, so every single generation produced the exact same count.
     courtside: dayTargets([
-      [1, 1],
+      [1, 2],
       [0, 1],
-      [1, 1],
+      [1, 2],
       [0, 1],
-      [1, 1],
-      [2, 2],
-      [1, 1],
+      [1, 2],
+      [2, 3],
+      [1, 2],
     ]),
     copper: dayTargets([
       [1, 3],
@@ -141,7 +144,9 @@ export const DEFAULT_SETTINGS: Settings = {
   formats: structuredClone(FORMATS),
   floors: Object.fromEntries(LOCATIONS.map((l) => [l.id, l.weeklyFloor])),
   bannedFormats: ["Foundations", "Studio Foundations", "SWEAT In 30", "Studio SWEAT In 30", "Hosted", "Hosted Class", "Studio Hosted"],
-  quality: { checkinFloor: 3.0, fillFloor: 22, minAcceptScore: 50 },
+  // Each location's classes must clear fill% or avg check-in on their own — not both — so a single
+  // low number never disqualifies an otherwise strong slot.
+  quality: { checkinFloor: 6, fillFloor: 50, minAcceptScore: 50 },
   limits: {
     weeklyCap: 15,
     dailyHourCap: 4,
@@ -187,6 +192,14 @@ function mergedTargets(saved: Settings["targets"] | undefined): Settings["target
     const weekdayMax = Math.max(...DAYS.filter((d) => d.key !== 5).map((d) => days[d.key]?.max ?? 0));
     const sat = days[5];
     if (sat && sat.max < weekdayMax) days[5] = { target: Math.max(sat.target, weekdayMax - 1), max: weekdayMax };
+    // A day whose max equals its target leaves the per-day "wobble" nothing to work with, so that
+    // day produces the exact same count on every single run regardless of seed. Every coverable day
+    // (target > 0) gets at least one class of headroom above target so a run can actually land
+    // somewhere different from the last one.
+    for (const key of Object.keys(days)) {
+      const d = days[Number(key)];
+      if (d.target > 0 && d.max <= d.target) days[Number(key)] = { ...d, max: d.target + 1 };
+    }
     out[locId] = days;
   }
   return out;
@@ -234,8 +247,22 @@ export function normalizeSettings(parsed: Settings | null | undefined): Settings
       targets: mergedTargets(parsed.targets),
       mix: mixedMix,
       ai: { ...DEFAULT_SETTINGS.ai, ...parsed.ai },
-      quality: { ...DEFAULT_SETTINGS.quality, ...parsed.quality },
-      limits: { ...DEFAULT_SETTINGS.limits, ...parsed.limits },
+      // Raise a stale saved floor up to the current default rather than let an old, lower value
+      // (e.g. the previous 22%/3.0 defaults) silently shadow a later increase in the required bar —
+      // the same problem the Saturday-target migration above solves, applied to quality floors.
+      quality: {
+        ...DEFAULT_SETTINGS.quality,
+        ...parsed.quality,
+        fillFloor: Math.max(parsed.quality?.fillFloor ?? 0, DEFAULT_SETTINGS.quality.fillFloor),
+        checkinFloor: Math.max(parsed.quality?.checkinFloor ?? 0, DEFAULT_SETTINGS.quality.checkinFloor),
+      },
+      // 15h/week across every location is an absolute ceiling, not a preference — clamp a saved
+      // value down rather than let a stale or hand-edited settings blob raise it.
+      limits: {
+        ...DEFAULT_SETTINGS.limits,
+        ...parsed.limits,
+        weeklyCap: Math.min(parsed.limits?.weeklyCap ?? DEFAULT_SETTINGS.limits.weeklyCap, DEFAULT_SETTINGS.limits.weeklyCap),
+      },
       trainers: parsed.trainers?.length ? parsed.trainers : structuredClone(TRAINERS),
       locations: mergedLocations,
       formats: parsed.formats?.length ? parsed.formats : structuredClone(FORMATS),

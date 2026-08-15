@@ -210,7 +210,7 @@ export function ClassModal({ session, all, onClose }: { session: Session; all: S
                 .filter((h) => h.trainerId !== session.trainerId)
                 .slice(0, 8)
                 .map((h) => {
-                  const hh = historicFor(session.locationId, session.day, session.time, h.name, h.trainerId);
+                  const hh = historicFor(session.locationId, session.day, session.time, h.name, trainerById(h.trainerId).name);
                   return (
                     <div key={h.trainerId + h.name} className="rounded-2xl bg-ink px-3 py-2 text-sm">
                       <p className="font-medium">
