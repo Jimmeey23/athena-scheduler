@@ -68,6 +68,11 @@ function familyKey(name: string) {
   return FORMATS.find((f) => f.name === name)?.fullName ?? name;
 }
 
+function isSpecialtyCapacityFormat(format: string) {
+  const family = FORMATS.find((f) => f.name === format)?.family;
+  return family === "cycle" || family === "strength";
+}
+
 function locationDaySessions(sessions: Session[], locationId: string, day: number) {
   return sessions.filter((s) => s.locationId === locationId && s.day === day);
 }
@@ -148,13 +153,15 @@ export function scoreCombo(
 ) {
   // Weighted against settings.ai.weight* so tuning happens in Settings, not code.
   const w = settings.ai;
-  const attendance = Math.min(w.weightCheckin * 100, (h.checkin / 10) * w.weightCheckin * 100);
+  const fillEquivalentCheckin = isSpecialtyCapacityFormat(format) ? (h.fill / 100) * 10 : h.checkin;
+  const attendanceBasis = Math.max(h.checkin, fillEquivalentCheckin);
+  const attendance = Math.min(w.weightCheckin * 100, (attendanceBasis / 10) * w.weightCheckin * 100);
   const fill = (h.fill / 100) * w.weightFill * 100;
   const trend = ((h.trend + 6) / 10) * w.weightTrend * 100;
   // A trainer with few personal runs but strong checkin/fill (i.e. slot-level evidence backs them up)
   // shouldn't be treated the same as a truly blind guess — only cap hard when both run count AND
   // performance are weak.
-  const strongEvidence = h.checkin >= 10 && h.fill >= 60;
+  const strongEvidence = (isSpecialtyCapacityFormat(format) ? h.fill >= 60 : h.checkin >= 10 && h.fill >= 60);
   const oneOff = h.sessions < 4 && !strongEvidence;
   const proven = oneOff ? 0 : Math.min(12, (Math.max(h.sessions, strongEvidence ? 12 : 0) / 40) * 12);
   const tier = ((5 - trainer.tier) / 4) * w.weightTier * 100;
@@ -583,7 +590,8 @@ function pickCandidate(
 	      if (zeroHistory && (!relaxed || !opts.allowExperimental)) continue;
 	      if (!relaxed && !zeroHistory) {
 	        if (hasPerformance() && h.sessions < 4) continue;
-        if (h.checkin < settings.quality.checkinFloor || h.fill < settings.quality.fillFloor) continue;
+        const passesQualityFloor = h.fill >= settings.quality.fillFloor && (h.checkin >= settings.quality.checkinFloor || isSpecialtyCapacityFormat(format.name));
+        if (!passesQualityFloor) continue;
 	      }
 	      const scored = scoreCombo(h, trainer, settings, format.name);
 	      const workedDays = trainerWorkedDays(book, trainer.id);

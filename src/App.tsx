@@ -607,6 +607,25 @@ export default function App() {
             </div>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3 lg:px-6">
+            {LOCATIONS.map((loc) => {
+              const active = loc.id === locationId;
+              const n = all.filter((s) => s.locationId === loc.id).length;
+              return (
+                <button
+                  key={loc.id}
+                  onClick={() => setLocationId(loc.id)}
+                  className={`rounded-full px-3.5 py-1.5 text-sm transition ${
+                    active ? "bg-gold text-white" : "bg-white text-mist ring-1 ring-line hover:text-ivory"
+                  }`}
+                >
+                  {loc.name}
+                  <span className={`ml-2 text-[10px] ${active ? "text-white/80" : "text-mist"}`}>{n}</span>
+                </button>
+              );
+            })}
+          </div>
+
           <div className="grid grid-cols-2 gap-2 px-4 py-4 sm:grid-cols-3 xl:grid-cols-9 lg:px-6">
             {kpis.map((k) => (
               <button key={k.key} onClick={() => setKpiKey(k.key)} className="panel rounded-2xl px-3 py-3 text-left">

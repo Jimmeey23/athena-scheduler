@@ -174,6 +174,18 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(KEY);
     if (!raw) return structuredClone(DEFAULT_SETTINGS);
     const parsed = JSON.parse(raw) as Settings;
+    const mergedLocations = (parsed.locations?.length ? parsed.locations : DEFAULT_SETTINGS.locations).map((loc) => {
+      const def = DEFAULT_SETTINGS.locations.find((l) => l.id === loc.id);
+      if (!def) return loc;
+      return {
+        ...def,
+        ...loc,
+        rooms: loc.rooms?.length ? loc.rooms : def.rooms,
+        roomTypes: { ...def.roomTypes, ...loc.roomTypes },
+        roomCapacity: { ...def.roomCapacity, ...loc.roomCapacity },
+        aliases: loc.aliases?.length ? loc.aliases : def.aliases,
+      };
+    });
     // Merge per-format band, keeping the higher of saved/default min so a stale saved band
     // (e.g. Kwality's Strength Lab min was raised from 2-4 to 8-12 in code) never permanently
     // shadows a later, larger default. Max follows the saved value when present.
@@ -201,7 +213,7 @@ export function loadSettings(): Settings {
       quality: { ...DEFAULT_SETTINGS.quality, ...parsed.quality },
       limits: { ...DEFAULT_SETTINGS.limits, ...parsed.limits },
       trainers: parsed.trainers?.length ? parsed.trainers : structuredClone(TRAINERS),
-      locations: parsed.locations?.length ? parsed.locations : structuredClone(LOCATIONS),
+      locations: mergedLocations,
       formats: parsed.formats?.length ? parsed.formats : structuredClone(FORMATS),
       bannedFormats: parsed.bannedFormats?.length ? parsed.bannedFormats : DEFAULT_SETTINGS.bannedFormats,
       floors: { ...DEFAULT_SETTINGS.floors, ...parsed.floors },
