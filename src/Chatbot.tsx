@@ -2,7 +2,7 @@ import { useState } from "react";
 import { MessageCircle, Send, X } from "lucide-react";
 import { DAYS, FORMATS, LOCATIONS, TIMES, TRAINERS, resolveLocationId, trainerById } from "./data";
 import type { Session, Settings } from "./types";
-import { historicFor, scoreCombo, generateSchedule, hasConflict } from "./engine";
+import { historicFor, scoreCombo, generateSchedule, hasConflict, weekOffDays } from "./engine";
 import { recordOverride } from "./overrides";
 
 type Msg = { role: "user" | "bot"; text: string };
@@ -252,7 +252,7 @@ export function applyNaturalLanguage(raw: string, all: Session[], settings: Sett
       const f = formats[(added.length + d) % formats.length];
       const who =
         trainer ||
-        roster.find((tr) => tr.active && tr.certs[f.cert] && tr.access[house]?.days.includes(d) && !tr.access[house]?.weekOff.includes(d));
+        roster.find((tr) => tr.active && tr.certs[f.cert] && tr.access[house]?.days.includes(d) && !weekOffDays(settings, tr.id).includes(d));
       if (!who) continue;
       const room = house === "supreme" && f.family === "cycle" ? "Studio 2" : f.studio;
       if (used.has(`${t}|${room}`)) continue;
@@ -275,7 +275,7 @@ export function applyNaturalLanguage(raw: string, all: Session[], settings: Sett
 
 function eligibleTrainer(format: (typeof FORMATS)[number], loc: string, day: number, settings: Settings) {
   const roster = settings.trainers?.length ? settings.trainers : TRAINERS;
-  return roster.find((t) => t.active && t.certs[format.cert] && t.access[loc]?.days.includes(day) && !t.access[loc]?.weekOff.includes(day));
+  return roster.find((t) => t.active && t.certs[format.cert] && t.access[loc]?.days.includes(day) && !weekOffDays(settings, t.id).includes(day));
 }
 
 function matchesFilter(s: Session, loc: string | null, day: number | null, time: string | null, format: (typeof FORMATS)[number] | undefined, trainer: (typeof TRAINERS)[number] | undefined) {

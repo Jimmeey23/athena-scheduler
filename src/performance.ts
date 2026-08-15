@@ -20,7 +20,16 @@ export type PerfRow = {
   date: string;
 };
 
-export type MatchTier = "exact" | "slot-format" | "trainer-format" | "trainer-only" | "format-only" | "none";
+export type MatchTier =
+  | "exact"
+  | "slot-format"
+  | "nearby-exact"
+  | "nearby-format"
+  | "trainer-format"
+  | "format-day"
+  | "trainer-only"
+  | "format-only"
+  | "none";
 
 export type PerfAgg = {
   sessions: number;
@@ -243,6 +252,11 @@ const IDX = {
   trainerLoc: new Map<string, PerfRow[]>(),
   classOnly: new Map<string, PerfRow[]>(),
   slotFormat: new Map<string, PerfRow[]>(),
+  // loc|day|class -> every run of that format on that weekday at that house (any time, any trainer).
+  classDayLoc: new Map<string, PerfRow[]>(),
+  // loc|day|class|trainer -> same, narrowed to one trainer. Powers the ±45min "nearby time" tier.
+  classDayLocTrainer: new Map<string, PerfRow[]>(),
+  classLoc: new Map<string, PerfRow[]>(),
 };
 
 function push(map: Map<string, PerfRow[]>, key: string, row: PerfRow) {
@@ -262,6 +276,9 @@ export function setPerformanceRows(rows: PerfRow[]) {
   IDX.trainerLoc.clear();
   IDX.classOnly.clear();
   IDX.slotFormat.clear();
+  IDX.classDayLoc.clear();
+  IDX.classDayLocTrainer.clear();
+  IDX.classLoc.clear();
   for (const r of rows) {
     const cls = norm(r.className);
     const tr = norm(r.trainer);
@@ -274,6 +291,9 @@ export function setPerformanceRows(rows: PerfRow[]) {
     push(IDX.classTrainer, `${r.locationId}|${cls}|${tr}`, r);
     push(IDX.trainerLoc, `${r.locationId}|${tr}`, r);
     push(IDX.classOnly, cls, r);
+    push(IDX.classDayLoc, `${r.locationId}|${r.dayKey}|${cls}`, r);
+    push(IDX.classDayLocTrainer, `${r.locationId}|${r.dayKey}|${cls}|${tr}`, r);
+    push(IDX.classLoc, `${r.locationId}|${cls}`, r);
   }
 }
 
@@ -306,18 +326,39 @@ function minutes(time: string) {
   return h * 60 + m;
 }
 
+// How far off the requested start time a historic run can sit and still count as the same slot.
+const NEARBY_MINUTES = 45;
+
+function nearby(rows: PerfRow[] | undefined, time: string) {
+  if (!rows?.length) return null;
+  const target = minutes(time);
+  const hit = rows.filter((r) => Math.abs(minutes(r.time) - target) <= NEARBY_MINUTES);
+  return hit.length ? hit : null;
+}
+
+// Evidence is looked up as a cascade, strongest first. The source schedule grid never lines up
+// perfectly with the planning grid (roughly a fifth of historic runs sit at times the planner
+// cannot even book), so an exact-time-only lookup declared most viable combinations "no data" and
+// starved whole houses — Supreme, and every class at Courtside/Copper, which have no rows at all.
+// Weaker tiers are still real evidence; scoreCombo() discounts them by tier instead of discarding.
 export function lookupAgg(locationId: string, day: number, time: string, className: string, trainerName: string) {
   const cls = norm(className);
   const tr = norm(trainerName);
-  const exact = IDX.unique2.get(uniqueKey2(locationId, day, time, className, trainerName)) || IDX.exact.get(`${locationId}|${day}|${timeHHMM(time)}|${cls}|${tr}`);
-  const slotFormat = !exact && (IDX.unique1.get(uniqueKey1(locationId, day, time, className)) || IDX.slotFormat.get(`${locationId}|${day}|${timeHHMM(time)}|${cls}`));
-  const rows = exact || slotFormat || [];
-  const tier: MatchTier = exact
-    ? "exact"
-    : slotFormat
-      ? "slot-format"
-      : "none";
-  return { ...aggregate(rows), tier };
+  const hhmm = timeHHMM(time);
+  const chain: Array<[MatchTier, PerfRow[] | null | undefined]> = [
+    ["exact", IDX.unique2.get(uniqueKey2(locationId, day, time, className, trainerName)) || IDX.exact.get(`${locationId}|${day}|${hhmm}|${cls}|${tr}`)],
+    ["slot-format", IDX.unique1.get(uniqueKey1(locationId, day, time, className)) || IDX.slotFormat.get(`${locationId}|${day}|${hhmm}|${cls}`)],
+    ["nearby-exact", nearby(IDX.classDayLocTrainer.get(`${locationId}|${day}|${cls}|${tr}`), hhmm)],
+    ["nearby-format", nearby(IDX.classDayLoc.get(`${locationId}|${day}|${cls}`), hhmm)],
+    ["trainer-format", IDX.classTrainer.get(`${locationId}|${cls}|${tr}`)],
+    ["format-day", IDX.classDayLoc.get(`${locationId}|${day}|${cls}`)],
+    ["trainer-only", IDX.trainerLoc.get(`${locationId}|${tr}`)],
+    ["format-only", IDX.classLoc.get(`${locationId}|${cls}`) || IDX.classOnly.get(cls)],
+  ];
+  for (const [tier, rows] of chain) {
+    if (rows?.length) return { ...aggregate(rows), tier };
+  }
+  return { ...aggregate([]), tier: "none" as MatchTier };
 }
 
 export function getPerformanceRows() {

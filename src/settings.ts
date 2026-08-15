@@ -43,16 +43,21 @@ export const DEFAULT_SETTINGS: Settings = {
       [7, 12],
       [8, 9],
       [8, 10],
-      [8, 11],
+      // Saturday is the peak-load day everywhere; Kenkere's old band topped out below its own
+      // Monday max, so no amount of repair could make Saturday the busiest day of its week.
+      [11, 14],
       [6, 7],
     ]),
+    // Courtside is staffed by Kajol alone, and her access days are Mon/Wed/Fri/Sat/Sun — Tuesday and
+    // Thursday cannot be covered at all, so they carry a target of 0 instead of a permanent
+    // violation. Saturday absorbs the difference, which also keeps it the week's peak day.
     courtside: dayTargets([
-      [1, 1],
-      [1, 1],
       [1, 1],
       [0, 1],
       [1, 1],
+      [0, 1],
       [1, 1],
+      [2, 2],
       [1, 1],
     ]),
     copper: dayTargets([
@@ -162,6 +167,8 @@ export const DEFAULT_SETTINGS: Settings = {
     fillSparseHouses: true,
     noConsecutiveFormat: true,
     boutiqueSameShiftOnly: true,
+    autoWeekOffs: true,
+    weekOffsPerTrainer: 2,
     openaiKey: "",
     openaiModel: "gpt-4.1-mini",
     googleClientId: "",
@@ -169,11 +176,28 @@ export const DEFAULT_SETTINGS: Settings = {
   },
 };
 
-export function loadSettings(): Settings {
+// Saved day targets are kept as the user set them, with one correction: Saturday is the peak-load
+// day, so its ceiling is lifted to at least the busiest weekday's ceiling. Without this, a settings
+// blob saved before that rule existed capped Saturday below Monday and no repair pass could ever
+// make Saturday the biggest day of the week.
+function mergedTargets(saved: Settings["targets"] | undefined): Settings["targets"] {
+  const out: Settings["targets"] = { ...DEFAULT_SETTINGS.targets, ...(saved ?? {}) };
+  for (const locId of Object.keys(out)) {
+    const days = { ...out[locId] };
+    const weekdayMax = Math.max(...DAYS.filter((d) => d.key !== 5).map((d) => days[d.key]?.max ?? 0));
+    const sat = days[5];
+    if (sat && sat.max < weekdayMax) days[5] = { target: Math.max(sat.target, weekdayMax - 1), max: weekdayMax };
+    out[locId] = days;
+  }
+  return out;
+}
+
+// Every path that brings in a Settings object from outside this build (localStorage, Supabase,
+// an imported JSON file) must go through here. Settings saved before a field existed — Kwality's
+// roomTypes map being the costly example — otherwise silently disable whole format families.
+export function normalizeSettings(parsed: Settings | null | undefined): Settings {
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return structuredClone(DEFAULT_SETTINGS);
-    const parsed = JSON.parse(raw) as Settings;
+    if (!parsed) return structuredClone(DEFAULT_SETTINGS);
     const mergedLocations = (parsed.locations?.length ? parsed.locations : DEFAULT_SETTINGS.locations).map((loc) => {
       const def = DEFAULT_SETTINGS.locations.find((l) => l.id === loc.id);
       if (!def) return loc;
@@ -207,7 +231,7 @@ export function loadSettings(): Settings {
     return {
       ...structuredClone(DEFAULT_SETTINGS),
       ...parsed,
-      targets: { ...DEFAULT_SETTINGS.targets, ...parsed.targets },
+      targets: mergedTargets(parsed.targets),
       mix: mixedMix,
       ai: { ...DEFAULT_SETTINGS.ai, ...parsed.ai },
       quality: { ...DEFAULT_SETTINGS.quality, ...parsed.quality },
@@ -218,6 +242,16 @@ export function loadSettings(): Settings {
       bannedFormats: parsed.bannedFormats?.length ? parsed.bannedFormats : DEFAULT_SETTINGS.bannedFormats,
       floors: { ...DEFAULT_SETTINGS.floors, ...parsed.floors },
     };
+  } catch {
+    return structuredClone(DEFAULT_SETTINGS);
+  }
+}
+
+export function loadSettings(): Settings {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return structuredClone(DEFAULT_SETTINGS);
+    return normalizeSettings(JSON.parse(raw) as Settings);
   } catch {
     return structuredClone(DEFAULT_SETTINGS);
   }

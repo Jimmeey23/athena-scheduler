@@ -55,6 +55,9 @@ export type Trainer = {
   specialty: string;
   tier: 1 | 2 | 3 | 4;
   active: boolean;
+  // Set when the week-off days were chosen by hand in Settings. While false, the generator picks
+  // this trainer's two rest days itself, from where the week's load actually needs them.
+  weekOffLocked?: boolean;
   certs: Record<CertKey, boolean>;
   access: Record<
     string,
@@ -182,6 +185,8 @@ export type Settings = {
     fillSparseHouses: boolean;
     noConsecutiveFormat: boolean;
     boutiqueSameShiftOnly: boolean;
+    autoWeekOffs: boolean;
+    weekOffsPerTrainer: number;
     openaiKey: string;
     openaiModel: string;
     googleClientId: string;
@@ -215,4 +220,6 @@ export type GenReport = {
     violations: string[];
   }>;
   notes: string[];
+  // Rest days actually granted this run, per trainer id — auto-assigned from load unless pinned.
+  weekOffs?: Record<string, number[]>;
 };

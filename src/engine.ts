@@ -1,13 +1,37 @@
 import { DAYS, FORMAT_PRIORITY, FORMATS, LOCATIONS, TIMES, TRAINERS as BASE_TRAINERS } from "./data";
 import { hasPerformance, lookupAgg, lookupExactAgg, lookupSlotFormatAgg } from "./performance";
 import { overrideBoost } from "./overrides";
-import type { Format, GenReport, Session, Settings, Tag, Trainer } from "./types";
+import type { Format, GenReport, Location, Session, Settings, Tag, Trainer } from "./types";
 
 function roster(settings: Settings) {
   return settings.trainers?.length ? settings.trainers : BASE_TRAINERS;
 }
+// Room names that are single-purpose wherever they appear. A location that lists one of these rooms
+// but (through stale saved/cloud settings) lost its roomTypes map would otherwise both ban its own
+// PowerCycle/Strength formats and hand the dedicated room out to Barre/Mat as generic overflow.
+const SPECIALTY_ROOMS: Record<string, "cycle" | "strength"> = {
+  "PowerCycle Studio": "cycle",
+  "Strength Lab": "strength",
+};
+
+function normalizeLocation(loc: Location): Location {
+  const roomTypes = { ...(loc.roomTypes ?? {}) };
+  for (const room of loc.rooms ?? []) {
+    const family = SPECIALTY_ROOMS[room];
+    if (family && !roomTypes[family]) roomTypes[family] = room;
+  }
+  return roomTypes === loc.roomTypes ? loc : { ...loc, roomTypes };
+}
+
+// houses() is called inside the innermost placement loops, so the normalized list is cached per
+// settings object rather than rebuilt on every call.
+const housesCache = new WeakMap<Settings, Location[]>();
 function houses(settings: Settings) {
-  return settings.locations?.length ? settings.locations : LOCATIONS;
+  const cached = housesCache.get(settings);
+  if (cached) return cached;
+  const list = (settings.locations?.length ? settings.locations : LOCATIONS).map(normalizeLocation);
+  housesCache.set(settings, list);
+  return list;
 }
 function catalog(settings: Settings) {
   return settings.formats?.length ? settings.formats : FORMATS;
@@ -102,10 +126,20 @@ function hasAdjacentSameFormat(sessions: Session[], locationId: string, day: num
 // Zero-history "experimental" placements are capped at 15% of a location's classes so class-mix
 // filler never dominates a proven, evidence-backed schedule.
 const EXPERIMENTAL_QUOTA = 0.15;
-function experimentalQuotaOk(sessions: Session[], locationId: string) {
-  const total = sessions.filter((s) => s.locationId === locationId).length;
+function experimentalQuotaOk(sessions: Session[], locationId: string, settings?: Settings) {
   const exp = sessions.filter((s) => s.locationId === locationId && s.tags.includes("experimental")).length;
-  return exp < Math.ceil(EXPERIMENTAL_QUOTA * (total + 1));
+  // Sized against the week the location is *aiming* for, not the classes placed so far. Keying it to
+  // the running count meant a house that starts empty (Courtside/Copper have zero historic rows, so
+  // every candidate is zero-history) allowed exactly one experimental class and then permanently
+  // locked itself out at one class for the week.
+  const planned = settings
+    ? Math.max(
+        settings.floors?.[locationId] ?? 0,
+        DAYS.reduce((sum, d) => sum + (settings.targets[locationId]?.[d.key]?.target ?? 0), 0)
+      )
+    : sessions.filter((s) => s.locationId === locationId).length;
+  const allowance = Math.max(4, Math.ceil(EXPERIMENTAL_QUOTA * planned));
+  return exp < allowance;
 }
 
 function allowedTime(day: number, time: string, settings?: Settings) {
@@ -145,8 +179,26 @@ function applyOverrideBoost(score: number, locationId: string, day: number, time
   return Math.round(Math.min(98, Math.max(28, score + boost)));
 }
 
+// Evidence from a weaker match tier is real, but it is not slot-specific — it gets discounted so a
+// citywide format average can never outrank a proven, exact-slot combination.
+const TIER_CONFIDENCE: Record<string, number> = {
+  exact: 1,
+  "slot-format": 0.97,
+  "nearby-exact": 0.94,
+  "nearby-format": 0.9,
+  "trainer-format": 0.88,
+  "format-day": 0.85,
+  "trainer-only": 0.8,
+  "format-only": 0.78,
+  none: 1,
+};
+
+function confidenceOf(tier?: string) {
+  return TIER_CONFIDENCE[tier ?? "exact"] ?? 0.8;
+}
+
 export function scoreCombo(
-  h: { checkin: number; fill: number; trend: number; sessions: number },
+  h: { checkin: number; fill: number; trend: number; sessions: number; tier?: string },
   trainer: Trainer,
   settings: Settings,
   format: string
@@ -166,7 +218,8 @@ export function scoreCombo(
   const proven = oneOff ? 0 : Math.min(12, (Math.max(h.sessions, strongEvidence ? 12 : 0) / 40) * 12);
   const tier = ((5 - trainer.tier) / 4) * w.weightTier * 100;
   const combo = FORMAT_PRIORITY[format]?.includes(trainer.id) ? 6 : 0;
-  let score = attendance + fill + trend + proven + tier + combo;
+  const confidence = confidenceOf(h.tier);
+  let score = (attendance + fill + trend + proven) * confidence + tier + combo;
   if (oneOff) score = Math.min(score, 56);
   if (w.preferTier1 && trainer.tier === 1) score += 2;
   score = Math.round(Math.min(98, Math.max(28, score)));
@@ -223,7 +276,9 @@ function roomFor(locationId: string, f: Format, book: Book, day: number, time: s
     return null;
   }
   if (rooms.includes(f.studio) && free(f.studio)) return f.studio;
-  const fallback = rooms.filter((r) => r !== house?.roomTypes?.strength && r !== house?.roomTypes?.cycle);
+  const fallback = rooms.filter(
+    (r) => r !== house?.roomTypes?.strength && r !== house?.roomTypes?.cycle && !SPECIALTY_ROOMS[r]
+  );
   return fallback.find((r) => free(r)) ?? null;
 }
 
@@ -284,6 +339,119 @@ function trainerWorkedDays(book: Book, trainerId: string) {
 
 const BOUTIQUE = new Set(["courtside", "copper"]);
 
+// ---------------------------------------------------------------------------
+// Week offs
+//
+// Rest days are an output of the schedule, not an input to it. Unless a trainer's week off has been
+// set by hand in Settings, the generator picks their days off itself — landing them on the days the
+// week can most afford to lose that trainer, which in practice means the quiet weekdays rather than
+// Saturday. The seeded weekOff arrays in the trainer data are treated as defaults to be overridden,
+// not as a contract.
+// ---------------------------------------------------------------------------
+
+function manualOffDays(settings: Settings, trainerId: string) {
+  const off = new Set<number>();
+  for (const l of settings.leave) if (l.trainerId === trainerId) l.days.forEach((d) => off.add(d));
+  for (const l of settings.offDays) if (l.trainerId === trainerId) l.days.forEach((d) => off.add(d));
+  return off;
+}
+
+function accessDays(t: Trainer) {
+  const days = new Set<number>();
+  for (const access of Object.values(t.access)) access.days.forEach((d) => days.add(d));
+  return days;
+}
+
+function computeWeekOffs(settings: Settings): Record<string, number[]> {
+  const list = roster(settings);
+  const out: Record<string, number[]> = {};
+  const desired = Math.max(0, settings.ai.weekOffsPerTrainer ?? 2);
+
+  if (settings.ai.autoWeekOffs === false) {
+    for (const t of list) {
+      out[t.id] = [...new Set(Object.values(t.access).flatMap((a) => a.weekOff))];
+    }
+    return out;
+  }
+
+  // Trainers whose rest days are fixed are placed first, so the load-based choices below can see
+  // the gaps they leave behind.
+  const locked = list.filter((t) => t.weekOffLocked);
+  const auto = list.filter((t) => !t.weekOffLocked);
+  for (const t of locked) out[t.id] = [...new Set(Object.values(t.access).flatMap((a) => a.weekOff))];
+
+  const offOn = (trainerId: string, day: number) =>
+    (out[trainerId] ?? []).includes(day) || manualOffDays(settings, trainerId).has(day);
+
+  // Who a house can still call on for a given day, given the offs assigned so far.
+  const availableAt = (locationId: string, day: number) =>
+    list.filter((t) => t.active && !settings.inactiveTrainers.includes(t.id) && t.access[locationId]?.days.includes(day) && !offOn(t.id, day));
+
+  // Most-constrained trainers choose first: someone available only three days a week has far less
+  // room to give than someone available all seven.
+  const order = [...auto].sort((a, b) => accessDays(a).size - accessDays(b).size || a.id.localeCompare(b.id));
+
+  for (const t of order) {
+    const manual = manualOffDays(settings, t.id);
+    const available = [...accessDays(t)].filter((d) => !manual.has(d));
+    const need = Math.max(0, desired - manual.size);
+    if (need === 0 || !t.active || settings.inactiveTrainers.includes(t.id)) {
+      out[t.id] = [...manual];
+      continue;
+    }
+    // Days the trainer is simply not available on already count as rest — no need to spend a
+    // deliberate week off on them.
+    const unavailable = DAYS.map((d) => d.key).filter((d) => !accessDays(t).has(d));
+    const alreadyResting = new Set([...manual, ...unavailable]);
+    const stillNeeded = Math.max(0, desired - alreadyResting.size);
+    if (stillNeeded === 0) {
+      out[t.id] = [...manual];
+      continue;
+    }
+    // Demand = how badly each house needs this trainer that day. A house chasing 12 classes with
+    // four eligible trainers left needs them far more than one chasing 6 with ten — and a house
+    // whose target simply cannot be met without them needs them more than either.
+    const scored = available
+      .map((day) => {
+        let demand = 0;
+        for (const loc of houses(settings)) {
+          if (!t.access[loc.id]?.days.includes(day)) continue;
+          const target = targetCount(settings, loc.id, day);
+          const others = availableAt(loc.id, day).filter((o) => o.id !== t.id);
+          demand += target / Math.max(1, others.length + 1);
+          // What the house loses by resting this trainer: the classes the remaining roster cannot
+          // physically cover. Courtside is staffed by one trainer, so their every access day scores
+          // as a total loss and is never given away as a rest day.
+          const capacityWithout = others.reduce((sum, o) => sum + Math.min(o.access[loc.id]?.maxPerDay ?? 0, limitsOf(settings).dailyHourCap), 0);
+          demand += Math.max(0, target - capacityWithout) * 6;
+        }
+        // Saturday is the deliberate peak-load day across every house — it is only ever surrendered
+        // when a trainer has no other day left to rest on.
+        return { day, demand: demand + (day === 5 ? 1000 : 0) };
+      })
+      .sort((a, b) => a.demand - b.demand || a.day - b.day);
+
+    const picked = scored.slice(0, Math.min(stillNeeded, Math.max(0, available.length - 1))).map((x) => x.day);
+    out[t.id] = [...new Set([...manual, ...picked])];
+  }
+  return out;
+}
+
+// Memoized per settings object: the same rest days must hold across every trial of a run, and every
+// caller outside the generator (chatbot, manual edits) has to see the same answer.
+const weekOffCache = new WeakMap<Settings, Record<string, number[]>>();
+export function weekOffsFor(settings: Settings): Record<string, number[]> {
+  const cached = weekOffCache.get(settings);
+  if (cached) return cached;
+  const computed = computeWeekOffs(settings);
+  weekOffCache.set(settings, computed);
+  return computed;
+}
+
+export function weekOffDays(settings: Settings, trainerId: string) {
+  return weekOffsFor(settings)[trainerId] ?? [];
+}
+
 function canUseTrainer(
   t: Trainer,
   locationId: string,
@@ -300,14 +468,20 @@ function canUseTrainer(
   const access = t.access[locationId];
   if (!access) return "no-access";
   if (!access.days.includes(day)) return "unavailable-day";
-  if (access.weekOff.includes(day)) return "week-off";
+  // Rest days come from weekOffsFor(), which honours a hand-set week off and otherwise derives one
+  // from the week's load — so this is a hard block even in the relaxed repair passes.
+  if (weekOffsFor(settings)[t.id]?.includes(day)) return "week-off";
   if (settings.leave.some((l) => l.trainerId === t.id && l.days.includes(day))) return "leave";
   if (settings.offDays.some((l) => l.trainerId === t.id && l.days.includes(day))) return "off-day";
   const tm = toMin(time);
   if (tm < toMin(access.start) || tm > toMin(access.end)) return "window";
   const dayKey = `${t.id}|${day}`;
   const workedDays = trainerWorkedDays(book, t.id);
-  if (!opts.relaxSoft && !workedDays.includes(day) && workedDays.length >= 6) return "week-off-minimum";
+  // Backstop for the rest-day guarantee: even if every assigned off day is somehow bypassed, a
+  // trainer can never be booked onto more than (7 - weekOffsPerTrainer) distinct days.
+  const maxWorkingDays = settings.ai.autoWeekOffs === false ? 6 : Math.max(1, 7 - (settings.ai.weekOffsPerTrainer ?? 2));
+  const relaxWorkingDays = opts.relaxSoft && settings.ai.autoWeekOffs === false;
+  if (!relaxWorkingDays && !workedDays.includes(day) && workedDays.length >= maxWorkingDays) return "week-off-minimum";
   if ((book.dayCount[dayKey] ?? 0) >= access.maxPerDay + (opts.relaxSoft ? 1 : 0)) return "day-class-cap";
   const limits = limitsOf(settings);
   if ((book.hours[dayKey] ?? 0) + duration / 60 > limits.dailyHourCap) return "day-hour-cap";
@@ -316,14 +490,22 @@ function canUseTrainer(
   if (overlapsAny(book.trainerIntervals[dayKey], tm, tm + duration)) return "overlap";
   const sh = shiftOf(time);
   const used = book.shift[dayKey];
-  if (!opts.relaxSoft && settings.ai.enforceAmPm !== false && used && used !== sh) return "am-pm-split";
   const locs = book.dayLocs[dayKey] || [];
-  if (locs.length && !locs.includes(locationId)) {
-    const secondOk = BOUTIQUE.has(locationId) && (!settings.ai.boutiqueSameShiftOnly || !used || used === sh);
-    if (!secondOk) return "two-locations-day";
-  }
+  const crossHouse = locs.length > 0 && !locs.includes(locationId);
+  // Courtside and Copper are single-room boutiques staffed entirely by trainers whose main house is
+  // Kenkere. A trainer may cover one of them as a second house on the same day — but only in the
+  // shift they are not already working elsewhere, since nobody can be at two houses at once. The
+  // previous rule demanded that second house be in the *same* shift, which the physical
+  // one-house-per-shift check immediately below then rejected, so the exemption never fired once
+  // and both boutiques were left with a single class a week.
+  const boutiqueSecondHouse = crossHouse && (BOUTIQUE.has(locationId) || locs.every((l) => BOUTIQUE.has(l)));
+  if (crossHouse && !boutiqueSecondHouse) return "two-locations-day";
+  if (!opts.relaxSoft && settings.ai.enforceAmPm !== false && used && used !== sh && !boutiqueSecondHouse) return "am-pm-split";
   const locKey = `${t.id}|${day}|${sh}`;
   if (book.locShift[locKey] && book.locShift[locKey] !== locationId) return "multi-location-shift";
+  // With the flag on, a boutique cover is only allowed as the trainer's *other* shift, never
+  // wedged into a shift they already spend at their main house.
+  if (boutiqueSecondHouse && settings.ai.boutiqueSameShiftOnly !== false && used === sh) return "boutique-shift-clash";
   const cluster = book.shiftTrainers[`${locationId}|${day}|${sh}`] || [];
   // Specialty-room formats (PowerCycle/Strength Lab) run in their own dedicated single room, so
   // they don't compete for the other studios — exempt them from the shift-cluster cap, otherwise
@@ -654,7 +836,7 @@ function tryAddSession(
       families: opts.families,
       names: opts.names,
       ignoreMixMax: opts.force,
-      allowExperimental: experimentalQuotaOk(sessions, locationId),
+      allowExperimental: experimentalQuotaOk(sessions, locationId, settings),
       relaxSoft: opts.relaxSoft,
     });
     if (!pick) continue;
@@ -768,14 +950,25 @@ function repairSaturdayPriority(sessions: Session[], book: Book, settings: Setti
   for (const loc of houses(settings)) {
     let saturday = dayCount(sessions, loc.id, 5);
     const maxOther = Math.max(...DAYS.filter((d) => d.key !== 5).map((d) => dayCount(sessions, loc.id, d.key)));
-    while (saturday < maxOther && saturday < maxCount(settings, loc.id, 5)) {
-      const families = loc.roomTypes?.cycle ? ["Barre 57", "PowerCycle"] : ["Barre 57", "Mat 57", "FIT"];
-      if (
-        !tryAddSession(sessions, book, settings, rand, loc.id, 5, SATURDAY_AM_TIMES, { families, tag: "constraint" }) &&
-        !tryReplaceSession(sessions, settings, rand, loc.id, 5, SATURDAY_AM_TIMES, { families, tag: "constraint" })
-      ) break;
+    // Saturday is the peak-load day: it must beat every other day and is pushed all the way to its
+    // configured max, not merely brought level with the busiest weekday.
+    const goal = maxCount(settings, loc.id, 5);
+    let guard = 0;
+    while (saturday < goal && guard < 24) {
+      guard += 1;
+      const families = loc.roomTypes?.cycle
+        ? ["Barre 57", "PowerCycle", "Mat 57", "FIT", "Cardio Barre"]
+        : ["Barre 57", "Mat 57", "FIT", "Cardio Barre"];
+      // AM is the Saturday priority, but once those slots are exhausted the rest of the grid is
+      // fair game — capping it at AM-only is what held Saturday to a handful of classes.
+      const placed =
+        tryAddSession(sessions, book, settings, rand, loc.id, 5, SATURDAY_AM_TIMES, { families, tag: "constraint" }) ||
+        tryAddSession(sessions, book, settings, rand, loc.id, 5, TIMES, { families, tag: "constraint" }) ||
+        tryAddSession(sessions, book, settings, rand, loc.id, 5, TIMES, { families, tag: "constraint", relaxSoft: true }) ||
+        (saturday < maxOther && tryReplaceSession(sessions, settings, rand, loc.id, 5, SATURDAY_AM_TIMES, { families, tag: "constraint" }));
+      if (!placed) break;
       book = rebuildBook(sessions, settings);
-      saturday += 1;
+      saturday = dayCount(sessions, loc.id, 5);
       added += 1;
     }
   }
@@ -910,6 +1103,10 @@ function repairCompliance(sessions: Session[], settings: Settings, rand: () => n
   changes += repairPeakParallelSlots(sessions, book, settings, rand);
   book = rebuildBook(sessions, settings);
   changes += repairShiftRatios(sessions, book, settings, rand);
+  book = rebuildBook(sessions, settings);
+  // Run last as well: the target/parallel/ratio passes above all add classes to weekdays, which can
+  // quietly push a weekday past Saturday after the first Saturday pass has already finished.
+  changes += repairSaturdayPriority(sessions, book, settings, rand);
   return { changes, book: rebuildBook(sessions, settings) };
 }
 
@@ -959,70 +1156,104 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean) {
   }
 
   const order = houses(settings).map((h) => h.id);
-  for (const locationId of order) {
-    const loc = houses(settings).find((l) => l.id === locationId)!;
-    for (const day of DAYS) {
+
+  // Filled day-by-day, interleaving the houses instead of finishing one house's whole week before
+  // starting the next. Most trainers hold access to two houses but can only work one of them per
+  // day, so a location-sequential fill let the first house claim every shared trainer on Monday and
+  // left Supreme (whose roster is almost entirely shared with Kwality) unable to reach target.
+  // Each round hands the next placement to whichever house is furthest behind its own target.
+  for (const day of DAYS) {
+    const times = shuffle(TIMES.filter((t) => allowedTime(day.key, t, settings)), rand);
+    const plans = order.map((locationId) => {
       const tgt = settings.targets[locationId]?.[day.key] ?? { target: 1, max: 2 };
       const wobble = Math.floor(rand() * 5) - 1;
       const sparseMin = settings.ai.fillSparseHouses !== false && locationId === "supreme" ? (day.key === 6 ? 5 : 8) : 1;
       const want = Math.min(Math.max(optimize ? tgt.target : Math.max(tgt.target, tgt.target + wobble), sparseMin, 1), tgt.max);
-      const cap = tgt.max;
-      const times = shuffle(
-        TIMES.filter((t) => allowedTime(day.key, t, settings)),
-        rand
-      );
-      let guard = 0;
-      while (sessions.filter((s) => s.locationId === locationId && s.day === day.key).length < Math.min(want, cap) && guard < 140) {
-        guard += 1;
-        const time = times[guard % times.length];
-        if (!settings.ai.allowParallel && book.rooms.has(`${day.key}|${time}|taken-any`)) continue;
-        const filled = sessions.filter((s) => s.locationId === locationId && s.day === day.key).length;
-        const progress = filled / Math.max(1, Math.min(want, cap));
-        const pick = pickCandidate(locationId, day.key, time, settings, book, rand, optimize || guard > 70, progress);
-        if (!pick) continue;
-        if (sessions.some((s) => s.locationId === locationId && s.day === day.key && s.time === time && s.studio === pick.room)) continue;
-        const s = makeSession(locationId, day.key, time, pick.format, pick.trainer, pick.room, settings);
-        sessions.push(s);
-        commit(book, pick.trainer, locationId, day.key, time, pick.format.duration, pick.format.name, pick.room);
+      const rooms = houses(settings).find((l) => l.id === locationId)?.rooms.length ?? 1;
+      return { locationId, want: Math.min(want, tgt.max), max: tgt.max, rooms, guard: 0, stalled: false };
+    });
+
+    const filledFor = (locationId: string) => sessions.filter((s) => s.locationId === locationId && s.day === day.key).length;
+    const shortfall = (p: (typeof plans)[number]) => (p.want - filledFor(p.locationId)) / Math.max(1, p.want);
+
+    // Phase 1 — evidence-backed placements, one at a time, neediest house first.
+    while (plans.some((p) => !p.stalled && filledFor(p.locationId) < p.want && p.guard < 140)) {
+      const queue = plans
+        .filter((p) => !p.stalled && filledFor(p.locationId) < p.want && p.guard < 140)
+        // Ties go to the smaller house: the boutiques have a single room and, in Courtside's case, a
+        // single eligible trainer, so they must claim them before a multi-room house books them out.
+        .sort((a, b) => shortfall(b) - shortfall(a) || a.rooms - b.rooms);
+      for (const plan of queue) {
+        const filled = filledFor(plan.locationId);
+        if (filled >= plan.want) continue;
+        let placed = false;
+        // A house gets a bounded burst of time-slot attempts per turn so one unusable slot doesn't
+        // cost it its place in the rotation.
+        for (let attempt = 0; attempt < 8 && !placed && plan.guard < 140; attempt++) {
+          plan.guard += 1;
+          const time = times[plan.guard % times.length];
+          if (!settings.ai.allowParallel && book.rooms.has(`${day.key}|${time}|taken-any`)) continue;
+          const progress = filled / Math.max(1, plan.want);
+          const pick = pickCandidate(plan.locationId, day.key, time, settings, book, rand, optimize || plan.guard > 70, progress);
+          if (!pick) continue;
+          if (sessions.some((s) => s.locationId === plan.locationId && s.day === day.key && s.time === time && s.studio === pick.room)) continue;
+          const s = makeSession(plan.locationId, day.key, time, pick.format, pick.trainer, pick.room, settings);
+          sessions.push(s);
+          commit(book, pick.trainer, plan.locationId, day.key, time, pick.format.duration, pick.format.name, pick.room);
+          placed = true;
+        }
+        if (!placed && plan.guard >= 140) plan.stalled = true;
       }
-      // Soft-constraint relaxation: if quality floors left the location short of its target,
-      // fill the gap with the best available option instead of silently under-booking, and
-      // flag it clearly so it's visible in the UI rather than a hidden shortfall.
+      if (queue.length === 0) break;
+      // Nothing landed anywhere this round — every remaining house is out of viable slots.
+      if (queue.every((p) => filledFor(p.locationId) >= p.want || p.stalled)) break;
+      if (plans.every((p) => p.stalled || filledFor(p.locationId) >= p.want)) break;
+    }
+
+    // Phase 2 — soft-constraint relaxation: if quality floors left a house short of its target,
+    // fill the gap with the best available option instead of silently under-booking, and flag it
+    // clearly so it's visible in the UI rather than a hidden shortfall.
+    for (const plan of [...plans].sort((a, b) => shortfall(b) - shortfall(a))) {
       let relaxedTries = 0;
-      while (
-        sessions.filter((s) => s.locationId === locationId && s.day === day.key).length < want &&
-        relaxedTries < 20
-      ) {
+      while (filledFor(plan.locationId) < plan.want && relaxedTries < 24) {
         relaxedTries += 1;
-        const time = times[(guard + relaxedTries) % times.length];
-        const pick = pickCandidate(locationId, day.key, time, settings, book, rand, true, 1, true, {
-          allowExperimental: experimentalQuotaOk(sessions, locationId),
+        const time = times[(plan.guard + relaxedTries) % times.length];
+        const pick = pickCandidate(plan.locationId, day.key, time, settings, book, rand, true, 1, true, {
+          allowExperimental: experimentalQuotaOk(sessions, plan.locationId, settings),
         });
         if (!pick) continue;
-        if (sessions.some((s) => s.locationId === locationId && s.day === day.key && s.time === time && s.studio === pick.room)) continue;
+        if (sessions.some((s) => s.locationId === plan.locationId && s.day === day.key && s.time === time && s.studio === pick.room)) continue;
         const tags: Tag[] = pick.experimental ? ["experimental"] : ["low", "constraint"];
-        const s = makeSession(locationId, day.key, time, pick.format, pick.trainer, pick.room, settings, tags);
+        const s = makeSession(plan.locationId, day.key, time, pick.format, pick.trainer, pick.room, settings, tags);
         sessions.push(s);
-        commit(book, pick.trainer, locationId, day.key, time, pick.format.duration, pick.format.name, pick.room);
-      }
-      // Fill toward max whenever a high-score leftover combo exists — runs on every
-      // generate, not just the explicit "Optimize" pass, so floors/mix targets land
-      // as close to max as evidence allows without needing a second manual click.
-      {
-        let extra = 0;
-        while (sessions.filter((s) => s.locationId === locationId && s.day === day.key).length < tgt.max && extra < 4) {
-          extra += 1;
-          const time = times[(guard + extra) % times.length];
-          const pick = pickCandidate(locationId, day.key, time, settings, book, rand, true);
-          if (!pick || pick.score < 78) break;
-          const s = makeSession(locationId, day.key, time, pick.format, pick.trainer, pick.room, settings);
-          sessions.push(s);
-          commit(book, pick.trainer, locationId, day.key, time, pick.format.duration, pick.format.name, pick.room);
-        }
+        commit(book, pick.trainer, plan.locationId, day.key, time, pick.format.duration, pick.format.name, pick.room);
       }
     }
 
-    // express must have a full-length pair same day
+    // Phase 3 — fill toward max whenever a high-score leftover combo exists. Runs on every generate,
+    // not just the explicit "Optimize" pass, so floors/mix targets land as close to max as evidence
+    // allows without needing a second manual click. Saturday is the deliberate peak-load day, so it
+    // pushes harder and accepts a slightly lower bar than the rest of the week.
+    for (const plan of plans) {
+      const saturday = day.key === 5;
+      const bar = saturday ? 70 : 78;
+      const budget = saturday ? 10 : 4;
+      let extra = 0;
+      while (filledFor(plan.locationId) < plan.max && extra < budget) {
+        extra += 1;
+        const time = times[(plan.guard + extra) % times.length];
+        const pick = pickCandidate(plan.locationId, day.key, time, settings, book, rand, true);
+        if (!pick || pick.score < bar) break;
+        if (sessions.some((s) => s.locationId === plan.locationId && s.day === day.key && s.time === time && s.studio === pick.room)) continue;
+        const s = makeSession(plan.locationId, day.key, time, pick.format, pick.trainer, pick.room, settings);
+        sessions.push(s);
+        commit(book, pick.trainer, plan.locationId, day.key, time, pick.format.duration, pick.format.name, pick.room);
+      }
+    }
+  }
+
+  // express must have a full-length pair same day
+  for (const locationId of order) {
     const locSessions = sessions.filter((s) => s.locationId === locationId);
     for (const s of locSessions) {
       const f = FORMATS.find((x) => x.name === s.name);
@@ -1031,8 +1262,6 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean) {
         if (!hasFull) s.tags = [...s.tags, "constraint"];
       }
     }
-
-    void loc;
   }
 
   const seen = new Set<string>();
@@ -1075,6 +1304,14 @@ function evaluate(sessions: Session[], settings: Settings, seed: number, trial: 
     };
   });
   if (locations.every((l) => l.floorMet)) notes.push("All weekly floors met.");
+  const weekOffs = weekOffsFor(settings);
+  const perTrainer = Math.max(0, settings.ai.weekOffsPerTrainer ?? 2);
+  if (settings.ai.autoWeekOffs !== false) {
+    const pinned = roster(settings).filter((t) => t.weekOffLocked).length;
+    notes.push(
+      `${perTrainer} week offs per trainer, placed on the quietest days they are needed${pinned ? ` (${pinned} pinned by hand)` : ""}.`
+    );
+  }
   notes.push(settings.ai.enforceAmPm ? "AM/PM split enforced." : "AM/PM split off.");
   notes.push(`Quality gate ${settings.quality.checkinFloor} check-ins / ${settings.quality.fillFloor}% fill.`);
   const blob = sessions.map((s) => `${s.locationId}${s.day}${s.time}${s.name}${s.trainerId}`).join("|");
@@ -1086,6 +1323,7 @@ function evaluate(sessions: Session[], settings: Settings, seed: number, trial: 
     pickedTrial: trial,
     locations,
     notes,
+    weekOffs,
   };
 }
 

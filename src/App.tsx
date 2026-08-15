@@ -31,10 +31,10 @@ import {
   trainerLoad,
 } from "./data";
 import type { Pin, Session, Settings, ViewId } from "./types";
-import { Dropdown, MultiSelect, topTrainersFor } from "./ui";
+import { Dropdown, MultiSelect, PortalPanel, topTrainersFor, usePortalPanel } from "./ui";
 import { complianceFor, generateSchedule, hasConflict, historicFor, refreshSessionMetrics, scoreCombo, slotHistory } from "./engine";
 import { FORMATS } from "./data";
-import { loadSettings, saveSettings } from "./settings";
+import { loadSettings, normalizeSettings, saveSettings } from "./settings";
 import { loadCurrentSchedule, loadDrafts, pushDraft, saveCurrentSchedule } from "./drafts";
 import { ENV } from "./env";
 import { SettingsView } from "./SettingsView";
@@ -112,8 +112,8 @@ export default function App() {
   const [reassigned, setReassigned] = useState<Record<string, string>>({});
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [weekStart, setWeekStart] = useState<Date>(() => mondayOf(new Date()));
-  const [weekPickerOpen, setWeekPickerOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
+  const weekPanel = usePortalPanel<HTMLButtonElement>();
+  const exportPanel = usePortalPanel<HTMLButtonElement>();
   const [bundle, setBundle] = useState(() => {
     const saved = loadCurrentSchedule();
     if (saved) return saved;
@@ -173,7 +173,7 @@ export default function App() {
     // Restores settings and the draft history from the shared Supabase state, if present.
     loadCloud()
       .then((cloud) => {
-        if (cloud?.settings) setSettings(cloud.settings as Settings);
+        if (cloud?.settings) setSettings(normalizeSettings(cloud.settings as Settings));
         if (cloud?.drafts?.length) setDrafts(cloud.drafts);
       })
       .catch(() => {
@@ -192,8 +192,8 @@ export default function App() {
         setTimeModal(null);
         setSimilarFor(null);
         setCreateFor(null);
-        setExportOpen(false);
-        setWeekPickerOpen(false);
+        exportPanel.close();
+        weekPanel.close();
         setRailOpen(false);
       }
     };
@@ -489,14 +489,15 @@ export default function App() {
             </div>
             <div className="relative shrink-0">
               <button
-                onClick={() => setWeekPickerOpen((o) => !o)}
+                ref={weekPanel.triggerRef}
+                onClick={weekPanel.toggle}
                 className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-white px-3 py-1.5 text-xs text-mist ring-1 ring-line hover:ring-[#005eed]/40"
               >
                 <Sun className="h-3.5 w-3.5 text-gold" />
                 Week of {fmtShort(weekStart)} – {fmtShort(new Date(weekStart.getTime() + 6 * 86400000))}
               </button>
-              {weekPickerOpen && (
-                <div className="absolute right-0 top-full z-40 mt-2 rounded-2xl border border-line bg-white p-3 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              {weekPanel.open && weekPanel.pos && (
+                <PortalPanel pos={weekPanel.pos} onClose={weekPanel.close}>
                   <p className="mb-2 text-[10px] uppercase tracking-wider text-mist">Pick any date in the week</p>
                   <input
                     type="date"
@@ -504,11 +505,11 @@ export default function App() {
                     onChange={(e) => {
                       if (!e.target.value) return;
                       setWeekStart(mondayOf(new Date(e.target.value)));
-                      setWeekPickerOpen(false);
+                      weekPanel.close();
                     }}
                     className="rounded-xl border border-line px-3 py-2 text-sm"
                   />
-                </div>
+                </PortalPanel>
               )}
             </div>
             <Dropdown
@@ -522,11 +523,11 @@ export default function App() {
             />
             <div className="flex shrink-0 flex-nowrap gap-2">
               <div className="relative shrink-0">
-                <button onClick={() => setExportOpen((o) => !o)} className="whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory">
+                <button ref={exportPanel.triggerRef} onClick={exportPanel.toggle} className="whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs text-mist ring-1 ring-line hover:text-ivory">
                   Export
                 </button>
-                {exportOpen && (
-                  <div className="absolute right-0 top-full z-40 mt-2 w-40 space-y-1 rounded-2xl border border-line bg-white p-2 text-xs shadow-2xl">
+                {exportPanel.open && exportPanel.pos && (
+                  <PortalPanel pos={exportPanel.pos} onClose={exportPanel.close}>
                     {([
                       ["CSV", () => exportCSV(sessions)],
                       ["JSON", () => exportJSON(sessions, bundle.report)],
@@ -538,14 +539,14 @@ export default function App() {
                         key={label}
                         onClick={() => {
                           fn();
-                          setExportOpen(false);
+                          exportPanel.close();
                         }}
-                        className="block w-full rounded-lg px-2 py-1.5 text-left hover:bg-ink"
+                        className="block w-full rounded-lg px-2 py-1.5 text-left text-xs hover:bg-ink"
                       >
                         {label}
                       </button>
                     ))}
-                  </div>
+                  </PortalPanel>
                 )}
               </div>
               <button

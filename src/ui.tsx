@@ -290,7 +290,7 @@ export function Panel({ className = "", children }: { className?: string; childr
 // Portals its open panel to document.body and positions it with `fixed` coords computed from the
 // trigger's bounding rect. Needed because any ancestor with overflow-x/y-auto (e.g. a scrolling
 // header) clips ordinary `absolute` popups — `fixed` escapes that clipping entirely.
-function usePortalPanel<T extends HTMLElement>() {
+export function usePortalPanel<T extends HTMLElement>() {
   const triggerRef = useRef<T>(null);
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
@@ -303,7 +303,7 @@ function usePortalPanel<T extends HTMLElement>() {
   return { triggerRef, open, pos, openPanel, close, toggle: () => (open ? close() : openPanel()) };
 }
 
-function PortalPanel({ pos, onClose, children }: { pos: { top: number; left: number; width: number }; onClose: () => void; children: ReactNode }) {
+export function PortalPanel({ pos, onClose, children }: { pos: { top: number; left: number; width: number }; onClose: () => void; children: ReactNode }) {
   return createPortal(
     <>
       <div className="fixed inset-0 z-[998]" onClick={onClose} />

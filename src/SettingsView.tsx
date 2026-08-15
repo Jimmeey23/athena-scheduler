@@ -235,6 +235,10 @@ export function SettingsView({
                                   onClick={() =>
                                     updateTrainer(t.id, {
                                       ...t,
+                                      // Touching these days pins them: the generator stops choosing
+                                      // this trainer's rest days from the week's load and uses
+                                      // exactly what is set here.
+                                      weekOffLocked: true,
                                       access: Object.fromEntries(
                                         Object.entries(t.access).map(([k, a]) => [
                                           k,
@@ -243,12 +247,22 @@ export function SettingsView({
                                       ),
                                     })
                                   }
-                                  className={`rounded px-1.5 py-0.5 text-[10px] ${off ? "bg-[#0e1729] text-white" : "bg-ink"}`}
+                                  className={`rounded px-1.5 py-0.5 text-[10px] ${off ? "bg-[#0e1729] text-white" : "bg-ink"} ${t.weekOffLocked ? "" : "opacity-60"}`}
+                                  title={t.weekOffLocked ? "Fixed week off" : "Auto-assigned from load — click to fix it"}
                                 >
                                   {d.label}
                                 </button>
                               );
                             })}
+                            {t.weekOffLocked && (
+                              <button
+                                onClick={() => updateTrainer(t.id, { ...t, weekOffLocked: false })}
+                                className="rounded px-1.5 py-0.5 text-[10px] text-[#005eed] underline"
+                                title="Hand back to the generator, which picks the two quietest days"
+                              >
+                                Auto
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -787,7 +801,8 @@ export function SettingsView({
                   ["clusterTrainers", "Few trainers per shift (2–3)"],
                   ["fillSparseHouses", "Force Supreme daily minimums"],
                   ["noConsecutiveFormat", "No consecutive same format"],
-                  ["boutiqueSameShiftOnly", "Courtside/Copper same-shift only"],
+                  ["boutiqueSameShiftOnly", "Courtside/Copper cover in the spare shift only"],
+                  ["autoWeekOffs", "Auto-assign week offs from load"],
                 ] as const
               ).map(([key, label]) => (
                 <label key={key} className="flex items-center justify-between rounded-2xl bg-ink px-3 py-3 text-sm">
@@ -806,6 +821,20 @@ export function SettingsView({
                 onChange={(e) => patch({ ai: { ...settings.ai, maxTrainersPerShift: Number(e.target.value) } })}
                 className="mt-2 w-full rounded-xl border border-line bg-white px-3 py-2"
               />
+            </label>
+            <label className="mt-4 block rounded-2xl bg-ink p-3 text-sm">
+              Week offs guaranteed per trainer
+              <input
+                type="number"
+                min={0}
+                max={4}
+                value={settings.ai.weekOffsPerTrainer ?? 2}
+                onChange={(e) => patch({ ai: { ...settings.ai, weekOffsPerTrainer: Number(e.target.value) } })}
+                className="mt-2 w-full rounded-xl border border-line bg-white px-3 py-2"
+              />
+              <span className="mt-1 block text-xs text-mist">
+                Days off are chosen from where the week's load allows, unless a trainer's week off is pinned in the Trainers tab.
+              </span>
             </label>
           </Panel>
         )}
