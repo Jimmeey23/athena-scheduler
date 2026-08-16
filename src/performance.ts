@@ -1,5 +1,5 @@
 import { DAYS, FORMATS, resolveLocationId } from "./data";
-import type { CertKey, Trainer } from "./types";
+import type { CertKey, MatchTier, Trainer } from "./types";
 
 export type PerfRow = {
   raw: Record<string, string>;
@@ -20,17 +20,6 @@ export type PerfRow = {
   revenue: number;
   date: string;
 };
-
-export type MatchTier =
-  | "exact"
-  | "slot-format"
-  | "nearby-exact"
-  | "nearby-format"
-  | "trainer-format"
-  | "format-day"
-  | "trainer-only"
-  | "format-only"
-  | "none";
 
 export type PerfAgg = {
   sessions: number;
@@ -255,6 +244,8 @@ const IDX = {
   slotFormat: new Map<string, PerfRow[]>(),
   // loc|day|class -> every run of that format on that weekday at that house (any time, any trainer).
   classDayLoc: new Map<string, PerfRow[]>(),
+  // loc|time|class -> same format at the same clock time on any weekday.
+  classTimeLoc: new Map<string, PerfRow[]>(),
   // loc|day|class|trainer -> same, narrowed to one trainer. Powers the ±45min "nearby time" tier.
   classDayLocTrainer: new Map<string, PerfRow[]>(),
   classLoc: new Map<string, PerfRow[]>(),
@@ -316,6 +307,7 @@ export function setPerformanceRows(rows: PerfRow[]) {
   IDX.classOnly.clear();
   IDX.slotFormat.clear();
   IDX.classDayLoc.clear();
+  IDX.classTimeLoc.clear();
   IDX.classDayLocTrainer.clear();
   IDX.classLoc.clear();
   HIST_CERTS = new Map();
@@ -332,6 +324,7 @@ export function setPerformanceRows(rows: PerfRow[]) {
     push(IDX.trainerLoc, `${r.locationId}|${tr}`, r);
     push(IDX.classOnly, cls, r);
     push(IDX.classDayLoc, `${r.locationId}|${r.dayKey}|${cls}`, r);
+    push(IDX.classTimeLoc, `${r.locationId}|${r.time}|${cls}`, r);
     push(IDX.classDayLocTrainer, `${r.locationId}|${r.dayKey}|${cls}|${tr}`, r);
     push(IDX.classLoc, `${r.locationId}|${cls}`, r);
     const cert = FORMAT_CERT.get(cls);
@@ -394,10 +387,11 @@ export function lookupAgg(locationId: string, day: number, time: string, classNa
   const chain: Array<[MatchTier, PerfRow[] | null | undefined]> = [
     ["exact", IDX.unique2.get(uniqueKey2(locationId, day, time, className, trainerName)) || IDX.exact.get(`${locationId}|${day}|${hhmm}|${cls}|${tr}`)],
     ["slot-format", IDX.unique1.get(uniqueKey1(locationId, day, time, className)) || IDX.slotFormat.get(`${locationId}|${day}|${hhmm}|${cls}`)],
+    ["format-day", IDX.classDayLoc.get(`${locationId}|${day}|${cls}`)],
+    ["format-time", IDX.classTimeLoc.get(`${locationId}|${hhmm}|${cls}`)],
     ["nearby-exact", nearby(IDX.classDayLocTrainer.get(`${locationId}|${day}|${cls}|${tr}`), hhmm)],
     ["nearby-format", nearby(IDX.classDayLoc.get(`${locationId}|${day}|${cls}`), hhmm)],
     ["trainer-format", IDX.classTrainer.get(`${locationId}|${cls}|${tr}`)],
-    ["format-day", IDX.classDayLoc.get(`${locationId}|${day}|${cls}`)],
     ["trainer-only", IDX.trainerLoc.get(`${locationId}|${tr}`)],
     ["format-only", IDX.classLoc.get(`${locationId}|${cls}`) || IDX.classOnly.get(cls)],
   ];

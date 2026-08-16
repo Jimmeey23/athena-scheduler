@@ -1,22 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  Bike,
   Building2,
   DoorOpen,
+  Dumbbell,
   FileText,
   Flame,
   GanttChart,
+  History,
   LayoutGrid,
   List,
   Map,
+  Moon,
   Search,
   ShieldAlert,
   SlidersHorizontal,
   Sparkles,
+  Shapes,
   Sun,
   Users,
   Wand2,
   X,
+  Zap,
 } from "lucide-react";
 import {
   DAYS,
@@ -42,7 +48,7 @@ import { ClassModal } from "./ClassModal";
 import { CreateClassModal } from "./CreateClassModal";
 import { Chatbot } from "./Chatbot";
 import { applyHistoricCerts, hasPerformance, loadSnapshotCsv, setPerformanceRows } from "./performance";
-import { loadCloud, persistCloud, persistSchedule, loadSchedule, finalizeSchedule } from "./supabase";
+import { loadCloud, persistCloud, persistSchedule, loadSchedule, finalizeSchedule, loadFinalizedSchedule } from "./supabase";
 import { recordOverride } from "./overrides";
 import { exportCSV, exportHTML, exportJSON, exportPDF, exportPNG } from "./export";import {
   AnalyticsView,
@@ -102,6 +108,27 @@ function isoDate(d: Date) {
 function fmtShort(d: Date) {
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
 }
+function minutesOf(time: string) {
+  const [h, m] = time.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function workloadTone(hours: number) {
+  const remaining = 15 - hours;
+  if (remaining < 0) return { color: "#ef4444", gradient: "linear-gradient(90deg, #ef4444, #fb7185)", label: "Over cap" };
+  if (remaining <= 1.5) return { color: "#f59e0b", gradient: "linear-gradient(90deg, #f59e0b, #facc15)", label: "Near cap" };
+  if (remaining <= 4) return { color: "#005eed", gradient: "linear-gradient(90deg, #005eed, #2f7cff)", label: "Balanced" };
+  if (remaining <= 7.5) return { color: "#10b981", gradient: "linear-gradient(90deg, #10b981, #34d399)", label: "Available" };
+  return { color: "#8b5cf6", gradient: "linear-gradient(90deg, #8b5cf6, #a78bfa)", label: "Light load" };
+}
+
+function formatIconFor(name: string) {
+  if (/cycle/i.test(name)) return Bike;
+  if (/strength|fit|hiit/i.test(name)) return Dumbbell;
+  if (/cardio|amped/i.test(name)) return Flame;
+  if (/recovery/i.test(name)) return Sparkles;
+  return Zap;
+}
 
 export default function App() {
   const [locationId, setLocationId] = useState("kwality");
@@ -109,6 +136,10 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [focusTrainer, setFocusTrainer] = useState<string | null>(null);
+  const [chipMode, setChipMode] = useState<"trainer" | "format">("trainer");
+  const [focusFormats, setFocusFormats] = useState<string[]>([]);
+  const [showDiscontinued, setShowDiscontinued] = useState(false);
+  const [finalizedBaseline, setFinalizedBaseline] = useState<Session[]>([]);
   const [reassigned, setReassigned] = useState<Record<string, string>>({});
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [weekStart, setWeekStart] = useState<Date>(() => mondayOf(new Date()));
@@ -141,6 +172,15 @@ export default function App() {
   const [aiOpen, setAiOpen] = useState(false);
   const [aiStep, setAiStep] = useState(0);
   const [railOpen, setRailOpen] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const saved = localStorage.getItem("athena-theme");
+    if (saved === "light" || saved === "dark") return saved;
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    localStorage.setItem("athena-theme", theme);
+  }, [theme]);
   const [toast, setToast] = useState<string | null>(null);
   const [kpiKey, setKpiKey] = useState<string | null>(null);
   const [perfCount, setPerfCount] = useState(0);
@@ -269,6 +309,32 @@ export default function App() {
     [bundle.sessions, pinned, reassigned]
   );
   const sessions = useMemo(() => all.filter((s) => s.locationId === locationId), [all, locationId]);
+  const filteredSessions = useMemo(
+    () =>
+      sessions.filter(
+        (s) =>
+          (!focusTrainer || s.trainerId === focusTrainer) &&
+          (!focusFormats.length || focusFormats.includes(s.name))
+      ),
+    [sessions, focusTrainer, focusFormats]
+  );
+  const filteredAll = useMemo(
+    () =>
+      all.filter(
+        (s) =>
+          (!focusTrainer || s.trainerId === focusTrainer) &&
+          (!focusFormats.length || focusFormats.includes(s.name))
+      ),
+    [all, focusTrainer, focusFormats]
+  );
+  const discontinued = useMemo(() => {
+    if (!showDiscontinued || !finalizedBaseline.length) return [] as Session[];
+    const live = new Set(all.map((s) => `${s.locationId}|${s.day}|${s.time}|${s.name}|${s.trainerId}|${s.studio}`));
+    return finalizedBaseline
+      .filter((s) => s.locationId === locationId)
+      .filter((s) => !live.has(`${s.locationId}|${s.day}|${s.time}|${s.name}|${s.trainerId}|${s.studio}`))
+      .map((s) => ({ ...s, id: `disc-${s.id}`, tags: [...new Set([...s.tags, "low" as const])], reason: `Discontinued from previous finalized schedule.` }));
+  }, [all, finalizedBaseline, locationId, showDiscontinued]);
   const kpis = kpisFor(sessions, pinned);
   const loads = trainerLoad(sessions);
   // Multi-Location view shows every house at once, so its workload panel must combine each
@@ -276,6 +342,48 @@ export default function App() {
   const combinedLoads = useMemo(() => trainerLoad(all), [all]);
   const ticker = tickerItems(sessions, location.name);
   const selected = sessions.find((s) => s.id === selectedId) ?? all.find((s) => s.id === selectedId) ?? null;
+  const locationMetrics = useMemo(() => {
+    const rows = all.filter((s) => s.locationId === locationId);
+    const locationPinned = rows.filter((s) => s.pinned || s.tags.includes("protected")).length;
+    const variety = rows.filter((s) => s.tags.includes("experimental") || s.tags.includes("new")).length;
+    const performers = rows.filter((s) => s.tags.includes("best") || s.score >= 84).length;
+    const avgFill = Math.round(rows.reduce((sum, s) => sum + s.fill, 0) / Math.max(1, rows.length));
+    const avgScore = Math.round(rows.reduce((sum, s) => sum + s.score, 0) / Math.max(1, rows.length));
+    const trainersUsed = new Set(rows.map((s) => s.trainerId)).size;
+    const historic = rows.filter((s) => s.sessions > 0).length;
+    return [
+      { label: "Scheduled", value: rows.length },
+      { label: "Pinned", value: locationPinned },
+      { label: "Variety", value: variety },
+      { label: "Performers", value: performers },
+      { label: "Avg fill", value: `${avgFill}%` },
+      { label: "Avg score", value: avgScore },
+      { label: "Trainers", value: trainersUsed },
+      { label: "Historic", value: historic },
+    ];
+  }, [all, locationId]);
+  const formatChips = useMemo(() => {
+    const rows = new globalThis.Map<string, { name: string; accent: string; count: number; fillTotal: number }>();
+    for (const s of sessions) {
+      const row = rows.get(s.name) ?? { name: s.name, accent: s.accent, count: 0, fillTotal: 0 };
+      row.count += 1;
+      row.fillTotal += s.fill;
+      rows.set(s.name, row);
+    }
+    return [...rows.values()]
+      .map((row) => ({ ...row, avgFill: Math.round(row.fillTotal / Math.max(1, row.count)), Icon: formatIconFor(row.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [sessions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadFinalizedSchedule(isoDate(weekStart)).then((saved) => {
+      if (!cancelled) setFinalizedBaseline(saved?.sessions ?? []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [weekStart]);
 
   function persistSettings(next = settings) {
     saveSettings(next);
@@ -423,19 +531,19 @@ export default function App() {
     },
   };
 
-  function addFromHistoric(opt: { day: number; time: string; name: string; trainerId: string }) {
+  function addFromHistoric(opt: { day: number; time: string; name: string; trainerId: string }, targetLocationId = locationId) {
     const format = FORMATS.find((f) => f.name === opt.name);
     const trainer = TRAINERS.find((t) => t.id === opt.trainerId);
     if (!format || !trainer) return;
-    const h = historicFor(locationId, opt.day, opt.time, format.name, trainer.name);
+    const h = historicFor(targetLocationId, opt.day, opt.time, format.name, trainer.name);
     const sc = scoreCombo(h, trainer, settings, format.name);
-    const room = locationById(locationId).roomTypes?.[format.family] ?? format.studio;
-    const capacity = locationById(locationId).roomCapacity?.[room] ?? 18;
+    const room = locationById(targetLocationId).roomTypes?.[format.family] ?? format.studio;
+    const capacity = locationById(targetLocationId).roomCapacity?.[room] ?? 18;
     setSessions([
       ...bundle.sessions,
       {
-        id: `${locationId}-${opt.day}-${opt.time}-${format.name}-${trainer.id}-${Date.now()}`,
-        locationId,
+        id: `${targetLocationId}-${opt.day}-${opt.time}-${format.name}-${trainer.id}-${Date.now()}`,
+        locationId: targetLocationId,
         day: opt.day,
         time: opt.time,
         name: format.name,
@@ -446,6 +554,7 @@ export default function App() {
         fill: h.fill,
         avg: h.checkin,
         sessions: h.sessions,
+        matchTier: h.tier,
         oneOff: sc.oneOff,
         reason: `Added from historic slot options. ${trainer.name} averages ${h.checkin} check-ins and ${h.fill}% fill over ${h.sessions} sessions.`,
         breakdown: sc.breakdown,
@@ -456,8 +565,15 @@ export default function App() {
     ]);
   }
 
-  function createClass(opts: { locationId: string; day: number; time: string; format: (typeof FORMATS)[number]; trainer: (typeof TRAINERS)[number]; recurring: boolean }) {
-    const { locationId: loc, day, time, format, trainer, recurring } = opts;
+  function createClass(opts: { locationId: string; day: number; time: string; format: (typeof FORMATS)[number]; trainer: (typeof TRAINERS)[number]; recurring: boolean; kind?: "regular" | "private" | "hosted"; customName?: string }) {
+    const { locationId: loc, day, time, trainer, recurring } = opts;
+    const kind = opts.kind ?? "regular";
+    const format = kind === "regular" ? opts.format : { ...opts.format, name: (opts.customName || opts.format.name).trim(), accent: kind === "private" ? "#7c3aed" : "#0891b2" };
+    if (day === 6 && minutesOf(time) + format.duration > 19 * 60) {
+      setToast("Sunday classes must end before 7pm");
+      setTimeout(() => setToast(null), 2600);
+      return;
+    }
     const conflict = hasConflict(bundle.sessions, { id: "new", locationId: loc, day, time, trainerId: trainer.id, studio: format.studio, duration: format.duration }, undefined, settings.limits.weeklyCap);
     if (conflict) {
       setToast(conflict);
@@ -481,13 +597,15 @@ export default function App() {
       fill: h.fill,
       avg: h.checkin,
       sessions: h.sessions,
+      matchTier: h.tier,
       oneOff: sc.oneOff,
+      kind,
       reason: recurring
         ? `Manually created and pinned \u2014 protected from future regenerations.`
         : `Manually created for this week only.`,
       breakdown: sc.breakdown,
       capacity,
-      tags: recurring ? ["protected", "new"] : ["new"],
+      tags: [...new Set([...(recurring ? ["protected" as const, "new" as const] : ["new" as const]), ...(kind === "regular" ? [] : [kind])])],
       accent: format.accent,
       pinned: recurring,
     };
@@ -497,7 +615,7 @@ export default function App() {
         ...settings,
         pins: [
           ...settings.pins,
-          { id: `pin-${Date.now()}`, locationId: loc, day, time, className: format.name, trainerId: trainer.id, note: "Manually created", enabled: true },
+          { id: `pin-${Date.now()}`, locationId: loc, day, time, className: format.name, trainerId: trainer.id, note: "Manually created", enabled: true, kind, duration: format.duration, studio: format.studio, cert: format.cert, family: format.family },
         ],
       });
     }
@@ -522,7 +640,11 @@ export default function App() {
         >
           <div className="flex h-[72px] items-center justify-center border-b border-line">
             <button onClick={() => { setView("grid"); setLocationId("kwality"); setSelectedId(null); setKpiKey(null); }} title="Home">
-              <img src="/images/athena-mark.png" alt="Athena" className="h-10 w-10 rounded-xl object-cover ring-1 ring-line" />
+              <img
+                src={theme === "dark" ? "/images/athena-mark-dark.png" : "/images/athena-mark.png"}
+                alt="Athena"
+                className="logo-mark h-10 w-10 rounded-xl object-cover ring-1 ring-line"
+              />
             </button>
           </div>
           <nav className="flex flex-1 flex-col items-center gap-1 py-3">
@@ -554,9 +676,9 @@ export default function App() {
             </button>
             <div className="min-w-[180px] shrink-0">
               <p className="font-serif text-[28px] leading-none tracking-tight text-ivory">
-                Athena <span className="italic text-gold">Scheduler</span>
+                Athena <span className="italic text-gold">Ai</span>
               </p>
-              <p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-mist">AI class schedule intelligence</p>
+              <p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-mist">Smart schedules. Stronger studios.</p>
             </div>
             <div className="relative w-40 shrink-0">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-mist" />
@@ -632,6 +754,7 @@ export default function App() {
               <button
                 onClick={async () => {
                   const ok = await finalizeSchedule(isoDate(weekStart), bundle);
+                  if (ok) setFinalizedBaseline(bundle.sessions);
                   setToast(ok ? `Finalized schedule saved for week of ${fmtShort(weekStart)}` : "Could not save to Supabase — check connection");
                   setTimeout(() => setToast(null), 2600);
                 }}
@@ -659,6 +782,14 @@ export default function App() {
               >
                 <Wand2 className="h-3.5 w-3.5" />
                 Optimize
+              </button>
+              <button
+                onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+                title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                aria-label="Toggle dark mode"
+                className="shrink-0 rounded-xl bg-white p-2 text-mist ring-1 ring-line hover:text-ivory"
+              >
+                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </button>
             </div>
           </header>
@@ -689,75 +820,134 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3 lg:px-6">
-            {LOCATIONS.map((loc) => {
-              const active = loc.id === locationId;
-              const n = all.filter((s) => s.locationId === loc.id).length;
-              return (
-                <button
-                  key={loc.id}
-                  onClick={() => setLocationId(loc.id)}
-                  className={`rounded-full px-3.5 py-1.5 text-sm transition ${
-                    active ? "bg-gold text-white" : "bg-white text-mist ring-1 ring-line hover:text-ivory"
-                  }`}
-                >
-                  {loc.name}
-                  <span className={`ml-2 text-[10px] ${active ? "text-white/80" : "text-mist"}`}>{n}</span>
-                </button>
-              );
-            })}
+            <div className="flex flex-wrap items-center gap-2">
+              {LOCATIONS.map((loc) => {
+                const active = loc.id === locationId;
+                const n = all.filter((s) => s.locationId === loc.id).length;
+                return (
+                  <button
+                    key={loc.id}
+                    onClick={() => setLocationId(loc.id)}
+                    className={`rounded-full px-3.5 py-1.5 text-sm transition ${
+                      active ? "bg-gold text-white" : "bg-white text-mist ring-1 ring-line hover:text-ivory"
+                    }`}
+                  >
+                    {loc.name}
+                    <span className={`ml-2 rounded-full px-1.5 py-0.5 text-[10px] ${active ? "bg-white/15 text-white" : "bg-ink text-mist"}`}>{n}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex min-w-0 flex-1 flex-wrap justify-start gap-1.5 lg:justify-end">
+              {locationMetrics.map((m) => (
+                <div key={m.label} className="location-metric-block min-w-[54px] rounded-lg bg-white px-2 py-1 text-center ring-1 ring-line">
+                  <p className="text-[15px] font-medium leading-none tabular-nums text-ivory">{m.value}</p>
+                  <p className="mt-0.5 text-[8px] font-medium uppercase leading-none tracking-[0.08em] text-mist">{m.label}</p>
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 px-4 py-4 sm:grid-cols-3 xl:grid-cols-9 lg:px-6">
-            {kpis.map((k) => (
-              <button key={k.key} onClick={() => setKpiKey(k.key)} className="panel rounded-2xl px-3 py-3 text-left">
-                <p className="text-[9px] uppercase tracking-[0.16em] text-mist">{k.label}</p>
-                <p
-                  className={`mt-1 font-serif text-[26px] leading-none ${
-                    k.tone === "good" ? "text-emerald-700" : k.tone === "warn" ? "text-amber-700" : k.tone === "bad" ? "text-rose-700" : "text-ivory"
-                  }`}
-                >
-                  {k.value}
-                </p>
-                <p className="mt-1 text-[10px] text-mist">{k.hint}</p>
-              </button>
-            ))}
-          </div>
-
-          {(view === "grid" || view === "trainer" || view === "multi") && (
+          {view !== "settings" && (
             <div className="px-4 pb-3 lg:px-6">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-[10px] uppercase tracking-[0.2em] text-mist">
-                  Trainer workload{view === "multi" ? " · all locations" : ""}
+                  {chipMode === "trainer" ? "Trainer workload" : "Class format filter"}{view === "multi" ? " · all locations" : ""}
                 </p>
-                <p className="text-[11px] text-mist">{(view === "multi" ? combinedLoads : loads).length} on the floor</p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowDiscontinued((v) => !v)}
+                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] ring-1 ring-line ${showDiscontinued ? "bg-[#0e1729] text-white" : "bg-white text-mist hover:text-ivory"}`}
+                  >
+                    <History className="h-3 w-3" />
+                    Discontinued
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChipMode((m) => (m === "trainer" ? "format" : "trainer"));
+                      setFocusTrainer(null);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[11px] text-mist ring-1 ring-line hover:text-ivory"
+                  >
+                    <Shapes className="h-3 w-3" />
+                    {chipMode === "trainer" ? "Show formats" : "Show trainers"}
+                  </button>
+                  <p className="text-[11px] text-mist">{chipMode === "trainer" ? (["trainer", "multi", "city"].includes(view) ? combinedLoads : loads).length : formatChips.length} visible</p>
+                </div>
               </div>
-              <div className="hide-scroll flex gap-2 overflow-x-auto pb-1">
-                {(view === "multi" ? combinedLoads : loads).map((t) => {
+              <div className="hide-scroll flex items-stretch gap-2 overflow-x-auto px-1 py-2">
+                {chipMode === "trainer" && (["trainer", "multi", "city"].includes(view) ? combinedLoads : loads).map((t) => {
                   const active = focusTrainer === t.id;
+                  const tone = workloadTone(t.hours);
+                  const utilization = Math.min(100, Math.round((t.hours / 15) * 100));
                   // In the combined view, a trainer's classes span more than one house — show how
                   // many distinct locations their hours are spread across alongside the total.
-                  const locationCount = view === "multi" ? new Set(all.filter((s) => s.trainerId === t.id).map((s) => s.locationId)).size : 0;
+                  const locationCount = ["trainer", "multi", "city"].includes(view) ? new Set(all.filter((s) => s.trainerId === t.id).map((s) => s.locationId)).size : 0;
                   return (
                     <button
                       key={t.id}
                       onClick={() => setFocusTrainer(active ? null : t.id)}
-                      className={`min-w-[132px] rounded-2xl p-2.5 text-left ring-1 transition ${
-                        active ? "bg-gold/10 ring-gold/40" : "bg-white ring-line hover:ring-gold/25"
+                      className={`workload-chip grid h-[112px] w-[112px] shrink-0 grid-rows-[auto_1fr_auto_auto] rounded-xl p-2.5 text-center ring-1 transition ${
+                        active
+                          ? "workload-chip-active ring-[#005eed]/50"
+                          : focusTrainer
+                            ? "workload-chip-muted bg-white ring-line"
+                            : "bg-white ring-line hover:ring-[#005eed]/30"
                       }`}
                     >
-                      <div className="flex items-center gap-2">
-                        <img src={t.photo} alt="" className="h-8 w-8 rounded-full object-cover" />
-                        <div className="min-w-0">
-                          <p className="truncate text-[12px] text-ivory">{t.name.split(" ")[0]}</p>
-                          <p className="text-[10px] text-mist">
-                            {t.hours}h · {t.classes}
-                            {locationCount > 1 ? ` · ${locationCount} houses` : ""}
-                          </p>
-                        </div>
+                      <div className="flex min-w-0 items-center justify-center">
+                        <span className="workload-avatar-frame" style={{ borderColor: tone.color }}>
+                          <img src={t.photo} alt="" className="workload-avatar-img" />
+                        </span>
                       </div>
-                      <div className="mt-2 h-1 overflow-hidden rounded-full bg-line">
-                        <div className="h-full rounded-full bg-gold" style={{ width: `${Math.min(100, t.hours * 10)}%` }} />
+                      <div className="flex min-w-0 flex-col items-center justify-center pt-1">
+                        <p className="max-w-full truncate text-[11px] font-semibold leading-tight text-ivory">{t.name.split(" ")[0]}</p>
+                        <p className="mt-0.5 max-w-full truncate text-[9px] leading-tight text-mist">
+                          {t.hours}h · {t.classes}
+                          {locationCount > 1 ? ` · ${locationCount}` : ""}
+                        </p>
                       </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-line">
+                        <div className="workload-fill h-full rounded-full" style={{ width: `${utilization}%`, background: tone.gradient }} />
+                      </div>
+                      <span className="mt-1 block w-full whitespace-nowrap text-[9px] font-semibold uppercase leading-none tracking-normal" style={{ color: tone.color }}>
+                        {t.hours > 15 ? `${(t.hours - 15).toFixed(1)}h over` : `${(15 - t.hours).toFixed(1)}h left`}
+                      </span>
+                    </button>
+                  );
+                })}
+                {chipMode === "format" && formatChips.map((sample) => {
+                  const active = focusFormats.includes(sample.name);
+                  const Icon = sample.Icon;
+                  return (
+                    <button
+                      key={sample.name}
+                      onClick={() => setFocusFormats((names) => active ? names.filter((n) => n !== sample.name) : [...names, sample.name])}
+                      className={`workload-chip grid h-[112px] w-[112px] shrink-0 grid-rows-[auto_1fr_auto_auto] rounded-xl p-2.5 text-center ring-1 transition ${
+                        active
+                          ? "workload-chip-active ring-[#005eed]/50"
+                          : focusFormats.length
+                            ? "workload-chip-muted bg-white ring-line"
+                            : "bg-white ring-line hover:ring-[#005eed]/30"
+                      }`}
+                    >
+                      <div className="flex min-w-0 items-center justify-center">
+                        <span className="workload-avatar-frame" style={{ borderColor: sample.accent }}>
+                          <Icon className="h-4 w-4" style={{ color: sample.accent }} />
+                        </span>
+                      </div>
+                      <div className="flex min-w-0 flex-col items-center justify-center pt-1">
+                        <p className="max-w-full truncate text-[11px] font-semibold leading-tight text-ivory">{sample.name}</p>
+                        <p className="mt-0.5 text-[9px] text-mist">{sample.count} classes</p>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-line">
+                        <div className="h-full rounded-full" style={{ width: `${sample.avgFill}%`, background: sample.accent }} />
+                      </div>
+                      <span className="mt-1 block w-full whitespace-nowrap text-[9px] font-semibold uppercase leading-none tracking-normal" style={{ color: sample.accent }}>
+                        {sample.avgFill}% fill
+                      </span>
                     </button>
                   );
                 })}
@@ -768,7 +958,7 @@ export default function App() {
           {perfCount > 0 && (
             <p className="px-4 text-[11px] text-mist lg:px-6">Scoring from {perfCount.toLocaleString()} source-sheet sessions (Hosted / Foundations / SWEAT excluded).</p>
           )}
-          <main className="min-h-0 flex-1 px-4 pb-8 lg:px-6">
+          <main className="schedule-shell mx-4 mb-8 min-h-0 flex-1 overflow-hidden px-3 py-3 lg:mx-6 lg:px-4">
             {view === "grid" && (
               <GridView
                 sessions={sessions}
@@ -776,6 +966,8 @@ export default function App() {
                 locationId={locationId}
                 pinned={pinned}
                 focusTrainer={focusTrainer}
+                focusFormats={focusFormats}
+                discontinued={discontinued}
                 query={query}
                 actions={actions}
                 weekStart={weekStart}
@@ -802,21 +994,21 @@ export default function App() {
                 onOpenCreate={(day, time) => setCreateFor({ locationId, day, time })}
               />
             )}
-            {view === "timeline" && <TimelineView sessions={sessions} onSelect={onSelect} />}
-            {view === "list" && <ListView sessions={sessions} pinned={pinned} onSelect={onSelect} />}
-            {view === "trainer" && <TrainerView sessions={all} onSelect={onSelect} />}
+            {view === "timeline" && <TimelineView sessions={filteredSessions} onSelect={onSelect} />}
+            {view === "list" && <ListView sessions={filteredSessions} pinned={pinned} onSelect={onSelect} />}
+            {view === "trainer" && <TrainerView sessions={filteredSessions} onSelect={onSelect} settings={settings} />}
             {view === "multi" && (
-              <MultiView all={all} actions={actions} focusTrainer={focusTrainer} onOpenCreate={(loc, day, time) => setCreateFor({ locationId: loc, day, time })} />
+              <MultiView all={all} actions={actions} focusTrainer={focusTrainer} focusFormats={focusFormats} onAdd={(loc, opt) => addFromHistoric(opt, loc)} onOpenCreate={(loc, day, time) => setCreateFor({ locationId: loc, day, time })} />
             )}
-            {view === "city" && <CityView all={all} actions={actions} onJump={(id) => { setLocationId(id); setView("grid"); }} />}
-            {view === "heatmap" && <HeatmapView sessions={sessions} />}
-            {view === "rooms" && <RoomsView sessions={sessions} all={all} actions={actions} />}
-            {view === "analytics" && <AnalyticsView sessions={sessions} all={all} />}
-            {view === "control" && <ControlView sessions={sessions} onSelect={onSelect} report={bundle.report} />}
+            {view === "city" && <CityView all={filteredAll} actions={actions} onJump={(id) => { setLocationId(id); setView("grid"); }} />}
+            {view === "heatmap" && <HeatmapView sessions={filteredSessions} />}
+            {view === "rooms" && <RoomsView sessions={filteredSessions} all={filteredAll} actions={actions} />}
+            {view === "analytics" && <AnalyticsView sessions={filteredSessions} all={filteredAll} metrics={kpisFor(filteredSessions, pinned)} onMetricSelect={setKpiKey} />}
+            {view === "control" && <ControlView sessions={filteredSessions} onSelect={onSelect} report={bundle.report} />}
             {view === "settings" && (
               <SettingsView settings={settings} setSettings={setSettings} onSave={() => persistSettings(settings)} />
             )}
-            {view === "report" && <ReportView sessions={sessions} locationName={location.name} all={all} />}
+            {view === "report" && <ReportView sessions={filteredSessions} locationName={location.name} all={filteredAll} />}
           </main>
         </div>
       </div>
@@ -943,6 +1135,7 @@ export default function App() {
                       fill: h.fill,
                       avg: h.checkin,
                       sessions: h.sessions,
+                      matchTier: h.tier,
                       oneOff: sc.oneOff,
                       breakdown: sc.breakdown,
                       reason: `Manual swap to ${c.trainer.name}. Historic fit: ${h.checkin} avg check-ins, ${h.fill}% fill across ${h.sessions} sessions.`,
@@ -1074,6 +1267,7 @@ export default function App() {
                         fill: hist.fill,
                         avg: hist.checkin,
                         sessions: hist.sessions,
+                        matchTier: hist.tier,
                         oneOff: sc.oneOff,
                         breakdown: sc.breakdown,
                         studio: room,

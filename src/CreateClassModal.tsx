@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { X } from "lucide-react";
+import { CalendarClock, LockKeyhole, PartyPopper, X } from "lucide-react";
 import { DAYS, LOCATIONS, TIMES, TRAINERS } from "./data";
 import { historicFor, scoreCombo } from "./engine";
 import { ScoreRing, FillBar, trainerWeekHours } from "./ui";
@@ -20,7 +20,7 @@ export function CreateClassModal({
   day: number;
   time: string;
   onClose: () => void;
-  onCreate: (opts: { locationId: string; day: number; time: string; format: Format; trainer: Trainer; recurring: boolean }) => void;
+  onCreate: (opts: { locationId: string; day: number; time: string; format: Format; trainer: Trainer; recurring: boolean; kind: "regular" | "private" | "hosted"; customName?: string }) => void;
 }) {
   const formats = settings.formats?.length ? settings.formats : [];
   const roster = settings.trainers?.length ? settings.trainers : TRAINERS;
@@ -32,8 +32,11 @@ export function CreateClassModal({
   const [d, setDay] = useState(day);
   const [t, setTime] = useState(time);
   const [recurring, setRecurring] = useState(true);
+  const [kind, setKind] = useState<"regular" | "private" | "hosted">("regular");
+  const [customName, setCustomName] = useState("");
 
   const format = formats.find((f) => f.name === formatName) ?? formats[0];
+  const customRequired = kind !== "regular";
 
   // How many of this format (or its Express/full-length pair) are already on the calendar
   // for this exact day and location \u2014 helps avoid over-scheduling one format.
@@ -78,6 +81,24 @@ export function CreateClassModal({
           </button>
         </div>
 
+        <div className="mt-4 grid grid-cols-3 gap-2 rounded-2xl bg-ink p-1">
+          {([
+            ["regular", CalendarClock, "Studio"],
+            ["private", LockKeyhole, "Private"],
+            ["hosted", PartyPopper, "Hosted"],
+          ] as const).map(([value, Icon, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setKind(value)}
+              className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-2 py-2 text-xs font-medium transition ${kind === value ? "bg-[#005eed] text-white shadow-sm" : "text-mist hover:bg-white hover:text-ivory"}`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className="mt-4 grid grid-cols-2 gap-3">
           <label className="text-xs text-mist">
             Location
@@ -110,7 +131,7 @@ export function CreateClassModal({
             </select>
           </label>
           <label className="text-xs text-mist">
-            Class format
+            Base format
             <select value={formatName} onChange={(e) => setFormatName(e.target.value)} className="mt-1 w-full rounded-xl border border-line bg-ink px-3 py-2 text-sm text-ivory">
               {formats.map((f) => (
                 <option key={f.name} value={f.name}>
@@ -120,6 +141,18 @@ export function CreateClassModal({
             </select>
           </label>
         </div>
+
+        {kind !== "regular" && (
+          <label className="mt-3 block text-xs text-mist">
+            {kind === "private" ? "Private class name" : "Hosted class name"}
+            <input
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              placeholder={kind === "private" ? "e.g. Private Session - Meera" : "e.g. Hosted: Wellness Circle"}
+              className="mt-1 w-full rounded-xl border border-line bg-ink px-3 py-2 text-sm text-ivory outline-none focus:border-[#005eed]"
+            />
+          </label>
+        )}
 
         <label className="mt-3 block text-xs text-mist">
           Trainer
@@ -157,11 +190,11 @@ export function CreateClassModal({
         </label>
 
         <button
-          disabled={!format || !picked}
-          onClick={() => format && picked && onCreate({ locationId: loc, day: d, time: t, format, trainer: picked.trainer, recurring })}
+          disabled={!format || !picked || (customRequired && !customName.trim())}
+          onClick={() => format && picked && onCreate({ locationId: loc, day: d, time: t, format, trainer: picked.trainer, recurring, kind, customName })}
           className="mt-4 w-full rounded-xl bg-[#005eed] py-2.5 text-sm font-medium text-white disabled:opacity-50"
         >
-          Add class
+          Add {kind === "private" ? "private" : kind === "hosted" ? "hosted" : "class"}
         </button>
       </div>
     </div>

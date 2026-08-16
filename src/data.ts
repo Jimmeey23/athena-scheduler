@@ -236,6 +236,8 @@ export const TAG_META: Record<Tag, { label: string; cls: string }> = {
   constraint: { label: "Trainer constraint", cls: "bg-orange-50 text-orange-800 ring-orange-200" },
   experimental: { label: "Experimental", cls: "bg-fuchsia-50 text-fuchsia-800 ring-fuchsia-200" },
   protected: { label: "Protected slot", cls: "bg-teal-50 text-teal-800 ring-teal-200" },
+  private: { label: "Private", cls: "bg-purple-50 text-purple-800 ring-purple-200" },
+  hosted: { label: "Hosted", cls: "bg-cyan-50 text-cyan-800 ring-cyan-200" },
   low: { label: "Low fill watch", cls: "bg-rose-50 text-rose-800 ring-rose-200" },
   violation: { label: "Hard flag", cls: "bg-red-50 text-red-700 ring-red-200" },
 };

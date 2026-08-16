@@ -7,6 +7,8 @@ export type Tag =
   | "constraint"
   | "experimental"
   | "protected"
+  | "private"
+  | "hosted"
   | "low"
   | "violation";
 
@@ -91,6 +93,18 @@ export type ScoreBreakdown = {
   combo: number;
 };
 
+export type MatchTier =
+  | "exact"
+  | "slot-format"
+  | "nearby-exact"
+  | "nearby-format"
+  | "trainer-format"
+  | "format-day"
+  | "format-time"
+  | "trainer-only"
+  | "format-only"
+  | "none";
+
 export type Session = {
   id: string;
   locationId: string;
@@ -104,7 +118,9 @@ export type Session = {
   fill: number;
   avg: number;
   sessions: number;
+  matchTier?: MatchTier;
   oneOff: boolean;
+  kind?: "regular" | "private" | "hosted";
   reason: string;
   breakdown: ScoreBreakdown;
   capacity: number;
@@ -136,6 +152,11 @@ export type Pin = {
   trainerId: string;
   note: string;
   enabled: boolean;
+  kind?: "regular" | "private" | "hosted";
+  duration?: number;
+  studio?: string;
+  cert?: CertKey;
+  family?: Format["family"];
 };
 
 export type DayTarget = { target: number; max: number };
@@ -202,6 +223,7 @@ export type HistoricOption = {
   sessions: number;
   score: number;
   oneOff: boolean;
+  matchTier: MatchTier;
 };
 
 export type GenReport = {

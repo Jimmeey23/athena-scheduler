@@ -1,5 +1,5 @@
 import { DAYS, FORMAT_PRIORITY, FORMATS, LOCATIONS, TIMES, TRAINERS as BASE_TRAINERS } from "./data";
-import { hasPerformance, lookupAgg, lookupExactAgg, lookupSlotFormatAgg } from "./performance";
+import { hasPerformance, lookupAgg } from "./performance";
 import { overrideBoost } from "./overrides";
 import type { Format, GenReport, Location, Session, Settings, Tag, Trainer } from "./types";
 
@@ -81,6 +81,36 @@ function shiftOf(t: string): "am" | "pm" {
 
 const PEAK_TIMES = ["07:15", "07:30", "08:00", "08:15", "08:30", "09:00", "09:15", "17:30", "18:00", "18:15", "18:30", "18:45", "19:00"];
 const SATURDAY_AM_TIMES = ["07:15", "07:30", "08:00", "08:15", "08:30", "09:00", "09:15", "10:15", "10:30", "11:00"];
+const SUNDAY_LAST_END = 19 * 60;
+const PRIME_WINDOWS: Record<string, Record<number, string[]>> = {
+  kwality: {
+    0: ["08:30", "18:45"],
+    1: ["08:30", "19:00"],
+    2: ["09:00", "08:00"],
+    3: ["09:15", "18:15"],
+    4: ["09:00", "17:45"],
+    5: ["10:15", "11:30"],
+    6: ["11:30", "10:15", "17:15"],
+  },
+  supreme: {
+    0: ["19:30", "11:00"],
+    1: ["09:15", "19:00"],
+    2: ["19:00", "08:45", "11:00"],
+    3: ["09:30", "08:00", "19:15"],
+    4: ["09:00", "19:00"],
+    5: ["09:00", "11:00", "11:30"],
+    6: ["10:00", "10:15", "16:30"],
+  },
+  kenkere: {
+    0: ["18:15", "17:00"],
+    1: ["19:15", "19:30", "17:15"],
+    2: ["07:15", "18:00", "19:30"],
+    3: ["18:15", "19:15"],
+    4: ["17:00", "18:15", "07:15"],
+    5: ["11:15", "09:15", "10:15"],
+    6: ["10:00", "17:00", "11:15"],
+  },
+};
 
 function shiftTarget(locationId: string) {
   return locationId === "kwality" || locationId === "supreme" ? 0.6 : 0.5;
@@ -151,6 +181,15 @@ function allowedTime(day: number, time: string, settings?: Settings) {
   return true;
 }
 
+function allowedEnd(day: number, time: string, duration: number) {
+  return day !== 6 || toMin(time) + duration <= SUNDAY_LAST_END;
+}
+
+function adjacentWindow(time: string) {
+  const target = toMin(time);
+  return TIMES.filter((t) => Math.abs(toMin(t) - target) <= 15);
+}
+
 export function historicFor(locationId: string, day: number, time: string, format: string, trainerName: string) {
   const any = lookupAgg(locationId, day, time, format, trainerName);
   const sessions = any.sessions;
@@ -187,6 +226,7 @@ const TIER_CONFIDENCE: Record<string, number> = {
   "nearby-format": 0.9,
   "trainer-format": 0.88,
   "format-day": 0.85,
+  "format-time": 0.83,
   "trainer-only": 0.8,
   "format-only": 0.78,
   none: 1,
@@ -219,8 +259,14 @@ export function scoreCombo(
   const combo = FORMAT_PRIORITY[format]?.includes(trainer.id) ? 6 : 0;
   const confidence = confidenceOf(h.tier);
   let score = (attendance + fill + trend + proven) * confidence + tier + combo;
+  const preferenceBonus = w.preferTier1 && trainer.tier === 1 ? 2 : 0;
+  score += preferenceBonus;
+  // The weighted components can add up to ~120 under default settings. Clamping that raw total
+  // directly at 98 flattened every strong combination into the same score. Normalize against the
+  // configured maximum first so 98 remains exceptional instead of becoming the common ceiling.
+  const configuredMaximum = ((w.weightCheckin + w.weightFill + w.weightTrend + w.weightTier) * 100) + 12 + 6 + preferenceBonus;
+  score = configuredMaximum > 0 ? (score / configuredMaximum) * 100 : score;
   if (oneOff) score = Math.min(score, 56);
-  if (w.preferTier1 && trainer.tier === 1) score += 2;
   score = Math.round(Math.min(98, Math.max(28, score)));
   return {
     score,
@@ -241,7 +287,7 @@ export function slotHistory(locationId: string, day: number, time: string) {
       BASE_TRAINERS.filter((t) => t.active && t.certs[f.cert] && t.access[locationId]).map((t) => {
         const h = historicFor(locationId, day, time, f.name, t.name);
         const sc = scoreCombo(h, t, { ai: { weightCheckin: 0.55, weightFill: 0.3, weightTrend: 0.05, weightTier: 0.1, preferTier1: true, enforceAmPm: true, allowParallel: true, autoPinHigh: true, useAiPass: true, openaiKey: "", openaiModel: "" } } as Settings, f.name);
-        return { name: f.name, trainerId: t.id, checkin: h.checkin, fill: h.fill, sessions: h.sessions, score: sc.score, oneOff: sc.oneOff };
+        return { name: f.name, trainerId: t.id, checkin: h.checkin, fill: h.fill, sessions: h.sessions, score: sc.score, oneOff: sc.oneOff, matchTier: h.tier };
       })
     )
     .filter((x) => !x.oneOff)
@@ -653,6 +699,7 @@ function makeSession(
     fill: h.fill,
     avg: h.checkin,
     sessions: h.sessions,
+    matchTier: h.tier,
     oneOff: scored.oneOff,
     reason,
     breakdown: scored.breakdown,
@@ -667,16 +714,19 @@ export function refreshSessionMetrics(sessions: Session[], settings: Settings) {
     const format = catalog(settings).find((f) => f.name === session.name);
     const trainer = roster(settings).find((t) => t.id === session.trainerId);
     if (!format || !trainer) return session;
-    const exact = lookupExactAgg(session.locationId, session.day, session.time, format.name, trainer.name);
-    const slotFormat = exact.sessions ? exact : lookupSlotFormatAgg(session.locationId, session.day, session.time, format.name);
+    // Refresh with the same evidence cascade used by generation. Restricting this pass to exact
+    // trainer-slot / class-slot matches erased legitimate nearby and format-level evidence after
+    // bootstrap, turning data-backed cards into zero-history cards even though generation had
+    // scored them correctly moments earlier.
+    const matched = lookupAgg(session.locationId, session.day, session.time, format.name, trainer.name);
     const h = {
-      checkin: slotFormat.checkin,
-      fill: slotFormat.fill,
-      trend: slotFormat.sessions >= 8 ? 4 : slotFormat.sessions >= 4 ? 0 : -6,
-      sessions: slotFormat.sessions,
-      revenue: slotFormat.revenue,
-      rows: slotFormat.rows,
-      tier: slotFormat.tier,
+      checkin: matched.checkin,
+      fill: matched.fill,
+      trend: matched.sessions >= 8 ? 4 : matched.sessions >= 4 ? 0 : -6,
+      sessions: matched.sessions,
+      revenue: matched.revenue,
+      rows: matched.rows,
+      tier: matched.tier,
     };
     const scored = scoreCombo(h, trainer, settings, format.name);
     scored.score = applyOverrideBoost(scored.score, session.locationId, session.day, session.time, format.name, trainer.id);
@@ -694,17 +744,33 @@ export function refreshSessionMetrics(sessions: Session[], settings: Settings) {
       fill: h.fill,
       avg: h.checkin,
       sessions: h.sessions,
+      matchTier: h.tier,
       oneOff: scored.oneOff,
       breakdown: scored.breakdown,
       capacity,
       tags,
-      reason: exact.sessions > 0
-        ? `${trainer.name} has proven performance for ${format.name} in this exact ${DAYS[session.day].full} ${session.time} slot at ${houses(settings).find((l) => l.id === session.locationId)?.name ?? session.locationId}: ${h.checkin} avg check-ins, ${h.fill}% fill across ${h.sessions} runs.`
-        : h.sessions > 0
-          ? `${format.name} is a proven fit for this exact ${DAYS[session.day].full} ${session.time} slot at ${houses(settings).find((l) => l.id === session.locationId)?.name ?? session.locationId}: ${h.checkin} avg check-ins, ${h.fill}% fill across ${h.sessions} runs. Trainer-specific evidence was not available for ${trainer.name}.`
-          : `${format.name} at ${DAYS[session.day].full} ${session.time} needs review because the expected class-slot history was not found after normalization.`,
+      reason: h.sessions > 0
+        ? `${trainer.name} × ${format.name} uses ${matchTierDescription(h.tier, session, trainer, format, settings)}: ${h.checkin} avg check-ins, ${h.fill}% fill across ${h.sessions} runs.`
+        : `${format.name} at ${DAYS[session.day].full} ${session.time} needs review because no historical evidence was found after normalization.`,
     };
   });
+}
+
+function matchTierDescription(tier: string, session: Session, trainer: Trainer, format: Format, settings: Settings) {
+  const house = houses(settings).find((l) => l.id === session.locationId)?.name ?? session.locationId;
+  const slot = `${DAYS[session.day].full} ${session.time}`;
+  const descriptions: Record<string, string> = {
+    exact: `exact trainer and class history for the ${slot} slot at ${house}`,
+    "slot-format": `class history for the exact ${slot} slot at ${house}, across instructors`,
+    "nearby-exact": `${trainer.name}'s ${format.name} history within 45 minutes of this slot at ${house}`,
+    "nearby-format": `${format.name} history within 45 minutes of this slot at ${house}, across instructors`,
+    "trainer-format": `${trainer.name}'s ${format.name} history in other slots at ${house}`,
+    "format-day": `${format.name} history on ${DAYS[session.day].full}s at ${house}`,
+    "format-time": `${format.name} history at ${session.time} on other weekdays at ${house}`,
+    "trainer-only": `${trainer.name}'s overall history at ${house}`,
+    "format-only": `${format.name} history at this house or elsewhere in the source data`,
+  };
+  return descriptions[tier] ?? "the best available historical evidence";
 }
 
 function pickCandidate(
@@ -740,6 +806,7 @@ function pickCandidate(
   );
   const ranked: Array<{ format: Format; trainer: Trainer; room: string; score: number; h: ReturnType<typeof historicFor>; experimental: boolean }> = [];
   for (const format of formats) {
+    if (!allowedEnd(day, time, format.duration)) continue;
     if (settings.ai.noConsecutiveFormat !== false) {
       const tl = book.timeline[`${locationId}|${day}`] || [];
       const earlier = [...tl].filter((p) => p.time < time).sort((a, b) => b.time.localeCompare(a.time))[0];
@@ -1024,17 +1091,51 @@ function repairDailyTargets(sessions: Session[], book: Book, settings: Settings,
   return added;
 }
 
+function repairWeeklyFloors(sessions: Session[], book: Book, settings: Settings, rand: () => number) {
+  let added = 0;
+  for (const loc of houses(settings)) {
+    const floor = settings.floors?.[loc.id] ?? loc.weeklyFloor;
+    let current = sessions.filter((s) => s.locationId === loc.id).length;
+    let guard = 0;
+    while (current < floor && guard < 40) {
+      guard += 1;
+      const days = shuffle([...DAYS], rand).sort((a, b) => dayCount(sessions, loc.id, a.key) - dayCount(sessions, loc.id, b.key));
+      let placed = false;
+      for (const day of days) {
+        if (dayCount(sessions, loc.id, day.key) >= maxCount(settings, loc.id, day.key)) continue;
+        const anchors = PRIME_WINDOWS[loc.id]?.[day.key] ?? PEAK_TIMES;
+        const times = [...new Set([...anchors.flatMap(adjacentWindow), ...TIMES])];
+        const families = loc.id === "kwality" ? ["Strength Lab", "PowerCycle", "Barre 57", "Mat 57", "FIT"] : loc.roomTypes?.cycle ? ["PowerCycle", "Barre 57", "Mat 57", "FIT"] : ["Barre 57", "Mat 57", "FIT", "Cardio Barre"];
+        placed =
+          tryAddSession(sessions, book, settings, rand, loc.id, day.key, times, { families, tag: "constraint" }) ||
+          tryAddSession(sessions, book, settings, rand, loc.id, day.key, times, { families, tag: "constraint", relaxSoft: true });
+        if (placed) break;
+      }
+      if (!placed) break;
+      current = sessions.filter((s) => s.locationId === loc.id).length;
+      added += 1;
+    }
+  }
+  return added;
+}
+
 function repairPeakParallelSlots(sessions: Session[], book: Book, settings: Settings, rand: () => number) {
   let added = 0;
   for (const loc of houses(settings).filter((l) => l.rooms.length > 1)) {
     for (const day of DAYS) {
-      for (const time of shuffle(PEAK_TIMES, rand)) {
-        if (dayCount(sessions, loc.id, day.key) >= maxCount(settings, loc.id, day.key)) continue;
-        const current = sessions.filter((s) => s.locationId === loc.id && s.day === day.key && s.time === time).length;
-        const target = loc.id === "kwality" ? Math.min(3, loc.rooms.length) : Math.min(2, loc.rooms.length);
-        if (current >= target) continue;
+      const anchors = PRIME_WINDOWS[loc.id]?.[day.key] ?? PEAK_TIMES;
+      for (const anchor of shuffle(anchors, rand)) {
+        const window = adjacentWindow(anchor);
         const families = loc.id === "kwality" ? ["Strength Lab", "PowerCycle", "Barre 57", "Mat 57", "FIT"] : loc.roomTypes?.cycle ? ["PowerCycle", "Barre 57", "Mat 57", "FIT"] : ["Barre 57", "Mat 57", "FIT", "Cardio Barre"];
-        if (tryAddSession(sessions, book, settings, rand, loc.id, day.key, [time], { families, tag: "constraint" })) added += 1;
+        const target = loc.id === "kwality" ? Math.min(4, loc.rooms.length) : Math.min(loc.rooms.length, loc.roomTypes?.cycle ? 3 : 2);
+        let guard = 0;
+        while (dayCount(sessions, loc.id, day.key) < maxCount(settings, loc.id, day.key) && guard < target) {
+          guard += 1;
+          const current = sessions.filter((s) => s.locationId === loc.id && s.day === day.key && window.includes(s.time)).length;
+          if (current >= target) break;
+          if (!tryAddSession(sessions, book, settings, rand, loc.id, day.key, window, { families, tag: "constraint" })) break;
+          added += 1;
+        }
       }
     }
   }
@@ -1053,11 +1154,13 @@ function repairPeakSpecialtyRooms(sessions: Session[], book: Book, settings: Set
     if (!specialtyFamilies.length) continue;
     for (const day of DAYS) {
       for (const { names } of specialtyFamilies) {
-        for (const time of shuffle(PEAK_TIMES, rand)) {
+        const anchors = PRIME_WINDOWS[loc.id]?.[day.key] ?? PEAK_TIMES;
+        for (const anchor of shuffle(anchors, rand)) {
+          const window = adjacentWindow(anchor);
           if (dayCount(sessions, loc.id, day.key) >= maxCount(settings, loc.id, day.key)) continue;
-          const already = sessions.some((s) => s.locationId === loc.id && s.day === day.key && s.time === time && names.includes(s.name));
+          const already = sessions.some((s) => s.locationId === loc.id && s.day === day.key && window.includes(s.time) && names.includes(s.name));
           if (already) continue;
-          if (tryAddSession(sessions, book, settings, rand, loc.id, day.key, [time], { names, tag: "constraint" })) added += 1;
+          if (tryAddSession(sessions, book, settings, rand, loc.id, day.key, window, { names, tag: "constraint" })) added += 1;
         }
       }
     }
@@ -1145,6 +1248,8 @@ function repairCompliance(sessions: Session[], settings: Settings, rand: () => n
   book = rebuildBook(sessions, settings);
   changes += repairDailyTargets(sessions, book, settings, rand);
   book = rebuildBook(sessions, settings);
+  changes += repairWeeklyFloors(sessions, book, settings, rand);
+  book = rebuildBook(sessions, settings);
   changes += repairPeakSpecialtyRooms(sessions, book, settings, rand);
   book = rebuildBook(sessions, settings);
   changes += repairPeakParallelSlots(sessions, book, settings, rand);
@@ -1154,6 +1259,8 @@ function repairCompliance(sessions: Session[], settings: Settings, rand: () => n
   // Run last as well: the target/parallel/ratio passes above all add classes to weekdays, which can
   // quietly push a weekday past Saturday after the first Saturday pass has already finished.
   changes += repairSaturdayPriority(sessions, book, settings, rand);
+  book = rebuildBook(sessions, settings);
+  changes += repairWeeklyFloors(sessions, book, settings, rand);
   // Absolute last word: prune toward the fill/check-in quality bar after every other pass has
   // finished adding classes, so nothing re-pads the count back up with weak filler afterward.
   changes += repairLocationQuality(sessions, settings, rand);
@@ -1179,15 +1286,35 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
   }
 
   for (const pin of settings.pins.filter((p) => p.enabled)) {
-    const format = catalog(settings).find((f) => f.name === pin.className);
     const trainer = roster(settings).find((t) => t.id === pin.trainerId);
-    if (!format || !trainer) continue;
+    if (!trainer) continue;
+    const customKind = pin.kind && pin.kind !== "regular" ? pin.kind : undefined;
+    const format = catalog(settings).find((f) => f.name === pin.className) ?? (customKind ? {
+      name: pin.className,
+      studio: pin.studio || houses(settings).find((l) => l.id === pin.locationId)?.rooms[0] || "Studio 1",
+      duration: pin.duration ?? 60,
+      accent: customKind === "private" ? "#7c3aed" : "#0891b2",
+      cert: pin.cert ?? "barre",
+      family: pin.family ?? "special",
+    } : null);
+    if (!format) continue;
     const room = roomFor(pin.locationId, format, book, pin.day, pin.time, settings);
     if (!room) continue;
     if (!allowedTime(pin.day, pin.time, settings)) continue;
+    if (!allowedEnd(pin.day, pin.time, format.duration)) continue;
     if (canUseTrainer(trainer, pin.locationId, pin.day, pin.time, format.duration, format, settings, book)) continue;
     const s = makeSession(pin.locationId, pin.day, pin.time, format, trainer, room, settings, ["protected"]);
     s.pinned = true;
+    if (customKind) {
+      s.kind = customKind;
+      s.tags = [...new Set([...s.tags, customKind])];
+      s.score = 0;
+      s.fill = 0;
+      s.avg = 0;
+      s.sessions = 0;
+      s.oneOff = false;
+      s.reason = `${customKind === "private" ? "Private" : "Hosted"} class pinned from manual schedule.`;
+    }
     sessions.push(s);
     commit(book, trainer, pin.locationId, pin.day, pin.time, format.duration, format.name, room);
   }

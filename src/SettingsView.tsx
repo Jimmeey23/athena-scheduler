@@ -1,16 +1,16 @@
 import { useState } from "react";
-import { Check, CheckCircle2, Circle, Search } from "lucide-react";
+import { Check, CheckCircle2, Circle, ImagePlus, Search } from "lucide-react";
 import { DAYS, FORMATS, LOCATIONS, TRAINERS } from "./data";
 import type { CustomRule, Settings } from "./types";
 import { Panel } from "./ui";
 
 const FAMILY_TINT: Record<string, string> = {
-  barre: "bg-rose-50/60",
-  mat: "bg-sky-50/60",
-  cycle: "bg-amber-50/60",
-  strength: "bg-emerald-50/60",
-  fit: "bg-violet-50/60",
-  special: "bg-slate-100/60",
+  barre: "cert-family-barre",
+  mat: "cert-family-mat",
+  cycle: "cert-family-cycle",
+  strength: "cert-family-strength",
+  fit: "cert-family-fit",
+  special: "cert-family-special",
 };
 
 const NAV = [
@@ -154,7 +154,26 @@ export function SettingsView({
                       <tr key={t.id}>
                         <td className="px-4 py-3">
                           <div className="flex items-start gap-2">
-                            <img src={t.photo} alt="" className="mt-0.5 h-8 w-8 rounded-full object-cover" />
+                            <div className="mt-0.5 flex flex-col items-center gap-1">
+                              <img src={t.photo} alt="" className="h-10 w-10 rounded-full object-cover ring-1 ring-line" />
+                              <label className="inline-flex cursor-pointer items-center justify-center rounded-lg bg-ink px-1.5 py-1 text-mist hover:text-[#005eed]" title="Upload trainer thumbnail">
+                                <ImagePlus className="h-3.5 w-3.5" />
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (!file) return;
+                                    const reader = new FileReader();
+                                    reader.onload = () => {
+                                      if (typeof reader.result === "string") updateTrainer(t.id, { ...t, photo: reader.result });
+                                    };
+                                    reader.readAsDataURL(file);
+                                  }}
+                                />
+                              </label>
+                            </div>
                             <div className="min-w-0">
                               <input
                                 value={t.name}
@@ -169,6 +188,12 @@ export function SettingsView({
                                 onChange={(e) => updateTrainer(t.id, { ...t, specialty: e.target.value })}
                                 placeholder="Specialty label…"
                                 className="mt-1.5 w-44 rounded-lg border border-line bg-white px-2 py-1 text-[11px] text-mist"
+                              />
+                              <input
+                                value={t.photo}
+                                onChange={(e) => updateTrainer(t.id, { ...t, photo: e.target.value })}
+                                placeholder="Thumbnail URL or uploaded image…"
+                                className="mt-1.5 w-44 rounded-lg border border-line bg-white px-2 py-1 text-[10px] text-mist"
                               />
                             </div>
                           </div>
@@ -298,29 +323,29 @@ export function SettingsView({
             else groups.push({ family: f.family, formats: [f] });
           }
           return (
-            <Panel className="overflow-x-auto p-5">
+            <Panel className="settings-cert-panel overflow-x-auto p-5">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="font-serif text-2xl">Certifications</h2>
                   <p className="text-sm text-mist">Every format requires a matching cert. Uncertified trainers are never auto-assigned.</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-1.5 rounded-xl border border-line bg-white px-2 py-1.5">
+                  <div className="cert-search flex items-center gap-1.5 rounded-xl border border-line px-2 py-1.5">
                     <Search className="h-3.5 w-3.5 text-mist" />
-                    <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search trainer…" className="w-28 text-xs outline-none" />
+                    <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search trainer…" className="w-28 bg-transparent text-xs outline-none" />
                   </div>
-                  <button className="inline-flex items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs text-[#005eed] hover:bg-ink" onClick={() => setAll(true)}>
+                  <button className="cert-action-btn inline-flex items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs text-[#005eed]" onClick={() => setAll(true)}>
                     <CheckCircle2 className="h-3.5 w-3.5" /> Qualify all
                   </button>
-                  <button className="inline-flex items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs text-mist hover:bg-ink" onClick={() => setAll(false)}>
+                  <button className="cert-action-btn inline-flex items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs text-mist" onClick={() => setAll(false)}>
                     <Circle className="h-3.5 w-3.5" /> Disqualify all
                   </button>
                 </div>
               </div>
-              <table className="w-full border-separate border-spacing-0 text-left text-[11px]">
+              <table className="cert-table w-full border-separate border-spacing-0 text-left text-[11px]">
                 <thead>
                   <tr>
-                    <th className="sticky left-0 z-20 border-b border-line bg-white py-1"></th>
+                    <th className="cert-sticky-cell sticky left-0 z-20 border-b border-line py-1"></th>
                     {groups.map((g, gi) => (
                       <th
                         key={g.family}
@@ -332,7 +357,7 @@ export function SettingsView({
                     ))}
                   </tr>
                   <tr className="text-mist">
-                    <th className="sticky left-0 z-20 border-b border-line bg-white py-2 pr-3">Trainer</th>
+                    <th className="cert-sticky-cell sticky left-0 z-20 border-b border-line py-2 pr-3">Trainer</th>
                     {formatList.map((f, fi) => {
                       const firstOfGroup = fi === 0 || formatList[fi - 1].family !== f.family;
                       return (
@@ -344,10 +369,10 @@ export function SettingsView({
                             {f.name}
                           </div>
                           <div className="mt-1 flex justify-center gap-1.5">
-                            <button className="rounded p-0.5 text-[#005eed] hover:bg-white/60" title={`Qualify all for ${f.name}`} onClick={() => setColumn(f.cert, true)}>
+                            <button className="cert-row-action rounded p-0.5 text-[#005eed]" title={`Qualify all for ${f.name}`} onClick={() => setColumn(f.cert, true)}>
                               <CheckCircle2 className="h-3.5 w-3.5" />
                             </button>
-                            <button className="rounded p-0.5 text-line hover:bg-white/60 hover:text-mist" title={`Disqualify all for ${f.name}`} onClick={() => setColumn(f.cert, false)}>
+                            <button className="cert-row-action rounded p-0.5 text-mist" title={`Disqualify all for ${f.name}`} onClick={() => setColumn(f.cert, false)}>
                               <Circle className="h-3.5 w-3.5" />
                             </button>
                           </div>
@@ -358,22 +383,17 @@ export function SettingsView({
                 </thead>
                 <tbody>
                   {trainers.map((t, ri) => {
-                    // Solid hex only — no /NN opacity utilities. The first column is `position:
-                    // sticky`, so it visually overlays whatever has scrolled underneath it; any
-                    // translucent background there (Tailwind's bg-ink/30, or bg-[inherit] inheriting
-                    // that same translucency) lets the scrolled-away columns show through as ghosting.
-                    const rowBg = ri % 2 ? "bg-[#f5f6f8]" : "bg-white";
-                    const rowHover = "group-hover:bg-[#eef4ff]";
+                    const rowBg = ri % 2 ? "cert-row-b" : "cert-row-a";
                     return (
-                      <tr key={t.id} className={`group ${rowBg} hover:bg-[#eef4ff]`}>
-                        <td className={`sticky left-0 z-10 border-b border-line py-2 pr-3 ${rowBg} ${rowHover}`}>
+                      <tr key={t.id} className={`cert-row group ${rowBg}`}>
+                        <td className={`cert-sticky-cell sticky left-0 z-10 border-b border-line py-2 pr-3 ${rowBg}`}>
                           <div className="flex items-center gap-2">
                             <img src={t.photo} alt="" className="h-6 w-6 shrink-0 rounded-full object-cover ring-1 ring-line" />
                             <span className="whitespace-nowrap font-medium">{t.name}</span>
-                            <button className="rounded p-0.5 text-[#005eed] hover:bg-ink" title={`Qualify ${t.name} for everything`} onClick={() => setRow(t.id, true)}>
+                            <button className="cert-row-action rounded p-0.5 text-[#005eed]" title={`Qualify ${t.name} for everything`} onClick={() => setRow(t.id, true)}>
                               <CheckCircle2 className="h-3.5 w-3.5" />
                             </button>
-                            <button className="rounded p-0.5 text-line hover:bg-ink hover:text-mist" title={`Disqualify ${t.name} from everything`} onClick={() => setRow(t.id, false)}>
+                            <button className="cert-row-action rounded p-0.5 text-mist" title={`Disqualify ${t.name} from everything`} onClick={() => setRow(t.id, false)}>
                               <Circle className="h-3.5 w-3.5" />
                             </button>
                           </div>
@@ -391,8 +411,8 @@ export function SettingsView({
                               title={`${t.name} · ${f.name}`}
                             >
                               <span
-                                className={`flex h-5 w-5 items-center justify-center rounded-full transition ${
-                                  t.certs[f.cert] ? "bg-[#005eed] text-white" : "border border-line bg-white text-transparent hover:border-mist"
+                                className={`cert-toggle flex h-5 w-5 items-center justify-center rounded-full transition ${
+                                  t.certs[f.cert] ? "cert-toggle-on" : "cert-toggle-off"
                                 }`}
                               >
                                 <Check className="h-3 w-3" strokeWidth={3} />
@@ -1094,4 +1114,3 @@ function NewLeaveForm({ roster, onAdd }: { roster: Array<{ id: string; name: str
     </div>
   );
 }
-

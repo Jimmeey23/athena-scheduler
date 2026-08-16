@@ -188,6 +188,7 @@ function buildSession(house: string, day: number, time: string, format: (typeof 
     fill: h.fill,
     avg: h.checkin,
     sessions: h.sessions,
+    matchTier: h.tier,
     oneOff: sc.oneOff,
     reason: `Live chat add. ${trainer.name} is certified for ${format.name}.`,
     breakdown: sc.breakdown,
