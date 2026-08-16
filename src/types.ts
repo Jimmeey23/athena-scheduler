@@ -24,7 +24,8 @@ export type ViewId =
   | "analytics"
   | "control"
   | "settings"
-  | "report";
+  | "report"
+  | "source";
 
 export type Location = {
   id: string;

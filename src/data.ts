@@ -242,9 +242,17 @@ export const TAG_META: Record<Tag, { label: string; cls: string }> = {
   violation: { label: "Hard flag", cls: "bg-red-50 text-red-700 ring-red-200" },
 };
 
+// Settings can add trainers beyond the static TRAINERS roster below (e.g. a house hiring someone
+// new) — App.tsx keeps this in sync with setLiveTrainers() on every settings change, so lookups
+// here and in trainerLoad() see them too, without every caller having to thread settings through.
+let liveTrainers: Trainer[] = TRAINERS;
+export function setLiveTrainers(list: Trainer[]) {
+  liveTrainers = list.length ? list : TRAINERS;
+}
+
 export function trainerById(id: string) {
   return (
-    TRAINERS.find((t) => t.id === id) || {
+    liveTrainers.find((t) => t.id === id) || {
       id,
       name: id,
       photo: "",
@@ -313,14 +321,14 @@ export function kpisFor(sessions: Session[], pinned: string[]) {
 
 export function trainerLoad(sessions: Session[]) {
   const map = new Map<string, { hours: number; classes: number }>();
-  for (const t of TRAINERS) map.set(t.id, { hours: 0, classes: 0 });
+  for (const t of liveTrainers) map.set(t.id, { hours: 0, classes: 0 });
   for (const s of sessions) {
     const row = map.get(s.trainerId);
     if (!row) continue;
     row.classes += 1;
     row.hours += s.duration / 60;
   }
-  return TRAINERS.map((t) => ({
+  return liveTrainers.map((t) => ({
     ...t,
     hours: Number((map.get(t.id)?.hours ?? 0).toFixed(1)),
     classes: map.get(t.id)?.classes ?? 0,

@@ -4,6 +4,7 @@ import {
   Bike,
   Building2,
   DoorOpen,
+  Database,
   Dumbbell,
   FileText,
   Flame,
@@ -33,6 +34,7 @@ import {
   kpisFor,
   levelOf,
   locationById,
+  setLiveTrainers,
   tickerItems,
   trainerById,
   trainerLoad,
@@ -48,7 +50,7 @@ import { SettingsView } from "./SettingsView";
 import { ClassModal } from "./ClassModal";
 import { CreateClassModal } from "./CreateClassModal";
 import { Chatbot } from "./Chatbot";
-import { applyHistoricCerts, hasPerformance, loadSnapshotCsv, setPerformanceRows } from "./performance";
+import { DEFAULT_SHEET_ID, applyHistoricCerts, hasPerformance, loadPerformanceData, setPerformanceRows } from "./performance";
 import { loadCloud, persistCloud, persistSchedule, loadSchedule, finalizeSchedule, loadFinalizedSchedule } from "./supabase";
 import { recordOverride } from "./overrides";
 import { exportCSV, exportHTML, exportJSON, exportPDF, exportPNG } from "./export";
@@ -65,6 +67,7 @@ import {
   MultiView,
   ReportView,
   RoomsView,
+  SourceDataView,
   TimelineView,
   TrainerView,
 } from "./views";
@@ -82,22 +85,33 @@ const VIEWS: { id: ViewId; label: string; icon: typeof LayoutGrid }[] = [
   { id: "control", label: "Control", icon: ShieldAlert },
   { id: "settings", label: "Settings", icon: SlidersHorizontal },
   { id: "report", label: "Report", icon: FileText },
+  { id: "source", label: "Source Data", icon: Database },
 ];
 
-const AI_STEPS = [
-  "Loading historic attendance and fill by class × trainer × slot…",
-  "Dropping Hosted, Foundations, and SWEAT In 30 from the candidate pool…",
-  "Applying saved pins, leave, certs, and inactive trainers…",
-  "Drafting Kwality House against weekly floor and mix bands…",
-  "Drafting Supreme HQ with PowerCycle priority trainers…",
-  "Drafting Kenkere / Courtside / Copper without banned formats…",
-  "Running 5 independent trials and scoring attendance, fill, and trend…",
-  "Rejecting one-off combos that outrank scheduled history…",
-  "Checking AM/PM split, 4h/day, 15h/week, one house per shift…",
-  "Applying learned corrections from your past manual swaps…",
-  "Hill-climbing: reassigning the weakest-scoring slots to stronger trainers…",
-  "Keeping the highest-accuracy unique draft…",
-];
+function formatLocationList(names: string[]) {
+  if (names.length <= 1) return names[0] ?? "the selected studio";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+// Scoped to whichever studios this run actually covers — a single-branch account should never see
+// another location named in its own generation progress.
+function buildAiSteps(locationNames: string[]): string[] {
+  const scopeLabel = formatLocationList(locationNames);
+  return [
+    "Loading historic attendance and fill rate by class, trainer, and time slot…",
+    "Excluding Hosted, Foundations, and SWEAT In 30 sessions from consideration…",
+    "Applying pinned classes, trainer leave, certifications, and inactive status…",
+    `Prioritizing proven top-performing slots for ${scopeLabel}…`,
+    ...locationNames.map((name) => `Drafting ${name} against its weekly floor and class-mix targets…`),
+    "Running independent trials, scoring each on attendance, fill, and trend…",
+    "Discounting one-off results without sustained historic support…",
+    "Verifying shift coverage, daily-hour, and weekly-hour compliance…",
+    "Incorporating corrections learned from prior manual adjustments…",
+    "Refining the draft by reassigning its weakest-scoring placements…",
+    "Selecting the highest-accuracy draft for review…",
+  ];
+}
 
 function mondayOf(d: Date) {
   const n = new Date(d);
@@ -148,6 +162,9 @@ export default function App() {
   const [finalizedBaseline, setFinalizedBaseline] = useState<Session[]>([]);
   const [reassigned, setReassigned] = useState<Record<string, string>>({});
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
+  useEffect(() => {
+    setLiveTrainers(settings.trainers ?? []);
+  }, [settings.trainers]);
   const [weekStart, setWeekStart] = useState<Date>(() => mondayOf(new Date()));
   const weekPanel = usePortalPanel<HTMLButtonElement>();
   const exportPanel = usePortalPanel<HTMLButtonElement>();
@@ -177,6 +194,7 @@ export default function App() {
   });
   const [aiOpen, setAiOpen] = useState(false);
   const [aiStep, setAiStep] = useState(0);
+  const [aiSteps, setAiSteps] = useState<string[]>(() => buildAiSteps([]));
   const [railOpen, setRailOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = localStorage.getItem("athena-theme");
@@ -234,14 +252,24 @@ export default function App() {
     // once, with the final settings and the final performance data both already in hand.
     let cancelled = false;
     (async () => {
-      const [cloudState, cloudBundle, perfRows] = await Promise.allSettled([loadCloud(), loadSchedule(), loadSnapshotCsv()]);
+      const [cloudState, cloudBundle, perfRows] = await Promise.allSettled([
+        loadCloud(),
+        loadSchedule(),
+        loadPerformanceData(settings.ai.spreadsheetId || DEFAULT_SHEET_ID),
+      ]);
       if (cancelled) return;
 
       if (perfRows.status === "fulfilled") {
         setPerformanceRows(perfRows.value);
         setPerfCount(perfRows.value.length);
+        if (!perfRows.value.length) {
+          console.warn("Performance data loaded but contained zero rows after filtering — check date range, banned-format list, and location mapping.");
+        }
       } else {
         setPerfCount(0);
+        console.error("Could not load performance data (live sync and snapshot fallback both failed):", perfRows.reason);
+        setToast("Could not load source performance data — check console for details");
+        setTimeout(() => setToast(null), 4000);
       }
 
       const cloudSettings = cloudState.status === "fulfilled" && cloudState.value?.settings ? normalizeSettings(cloudState.value.settings as Settings) : null;
@@ -269,10 +297,20 @@ export default function App() {
         const nonPinned = current.sessions.filter((s) => !s.pinned && !s.tags.includes("protected"));
         const blindShare = nonPinned.length ? nonPinned.filter((s) => s.sessions === 0).length / nonPinned.length : 0;
         const looksDataBacked = current.report?.usedPerformanceData && blindShare < 0.4;
+        // A branch account's session must never trigger a regeneration outside its own locations —
+        // this self-heal path used to always regenerate every location's cloud schedule, even for a
+        // session that can only see 2-3 of them.
         const next = !hasPerformance()
           ? current
           : !looksDataBacked
-            ? generateSchedule(finalSettings, current.report?.seed ?? Date.now(), false)
+            ? (() => {
+                const scoped = allowedLocationIds.length < LOCATIONS.length ? allowedLocationIds : undefined;
+                if (!scoped) return generateSchedule(finalSettings, current.report?.seed ?? Date.now(), false);
+                const untouched = current.sessions.filter((s) => !scoped.includes(s.locationId));
+                const generated = generateSchedule(finalSettings, current.report?.seed ?? Date.now(), false, scoped, untouched);
+                const sessions = [...untouched, ...generated.sessions];
+                return { sessions, report: complianceFor(sessions, finalSettings) };
+              })()
             : { ...current, sessions: refreshSessionMetrics(current.sessions, finalSettings) };
         saveCurrentSchedule(next);
         if (next !== current || cloud) persistSchedule(next);
@@ -427,13 +465,16 @@ export default function App() {
   }
 
   function runAi(kind: "generate" | "optimize") {
+    const runLocationIds = genLocationIds.length ? genLocationIds : allowedLocationIds;
+    const steps = buildAiSteps(runLocationIds.map((id) => locationById(id).name));
+    setAiSteps(steps);
     setAiOpen(true);
     setAiStep(0);
     let i = 0;
     const timer = setInterval(() => {
       i += 1;
       setAiStep(i);
-      if (i >= AI_STEPS.length) {
+      if (i >= steps.length) {
         clearInterval(timer);
         const seed = (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0;
         const scoped = genLocationIds.length && genLocationIds.length < LOCATIONS.length ? genLocationIds : undefined;
@@ -1057,6 +1098,7 @@ export default function App() {
               <SettingsView settings={settings} setSettings={setSettings} onSave={() => persistSettings(settings)} allowedLocationIds={allowedLocationIds} />
             )}
             {view === "report" && <ReportView sessions={filteredSessions} locationName={location.name} all={filteredAll} />}
+            {view === "source" && <SourceDataView allowedLocationIds={allowedLocationIds} scheduledSessions={all} />}
           </main>
         </div>
       </div>
@@ -1360,15 +1402,15 @@ export default function App() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <p className="mt-1 text-sm text-mist">About two minutes — enough time to test trainer clusters, fill Supreme, and drop conflicts.</p>
+            <p className="mt-1 text-sm text-mist">Approximately two minutes, evaluating trainer coverage and resolving scheduling conflicts across every candidate slot.</p>
             <div className="mt-5 h-2 overflow-hidden rounded-full bg-ink">
-              <div className="h-full rounded-full bg-[#005eed] transition-all" style={{ width: `${Math.min(100, (aiStep / AI_STEPS.length) * 100)}%` }} />
+              <div className="h-full rounded-full bg-[#005eed] transition-all" style={{ width: `${Math.min(100, (aiStep / aiSteps.length) * 100)}%` }} />
             </div>
             <p className="mt-2 text-right text-[11px] text-mist">
-              {aiStep}/{AI_STEPS.length}
+              {aiStep}/{aiSteps.length}
             </p>
             <div className="mt-4 max-h-56 space-y-1.5 overflow-auto">
-              {AI_STEPS.map((step, i) => (
+              {aiSteps.map((step, i) => (
                 <div key={step} className={`flex gap-2 rounded-2xl px-3 py-2 text-sm ${i === aiStep ? "bg-[#eef4ff] text-[#005eed]" : i < aiStep ? "text-ivory" : "text-mist"}`}>
                   <span className="w-5 tabular-nums">{i < aiStep ? "✓" : i === aiStep ? "●" : "○"}</span>
                   {step}

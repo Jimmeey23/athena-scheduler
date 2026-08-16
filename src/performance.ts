@@ -1,4 +1,5 @@
 import { DAYS, FORMATS, resolveLocationId } from "./data";
+import { getClient } from "./supabase";
 import type { CertKey, MatchTier, Trainer } from "./types";
 
 export type PerfRow = {
@@ -30,7 +31,10 @@ export type PerfAgg = {
   rows: PerfRow[];
 };
 
-const BANNED = /hosted|foundations|sweat/i;
+const BANNED = /hosted|foundations|sweat|junior/i;
+// Nothing before this date counts as usable history anywhere in the app — scheduling, rankings, or
+// the Source Data reference view.
+const HISTORY_FLOOR = "2026-01-01";
 
 export const DEFAULT_SHEET_ID = "16wFlke0bHFcmfn-3UyuYlGnImBq0DY7ouVYAlAFTZys";
 export const SNAPSHOT_CSV =
@@ -125,6 +129,7 @@ export function parseCsv(text: string): PerfRow[] {
     const time = timeHHMM(c[iTime] || "");
     const date = c[iDate] || "";
     if (!hasOccurred(date, time)) continue;
+    if (date && date < HISTORY_FLOOR) continue;
     const rowDay = dayKey(day);
     rows.push({
       raw,
@@ -212,6 +217,68 @@ export function aggregate(rows: PerfRow[]): PerfAgg {
   return { sessions, checkin: Number(checkin.toFixed(1)), fill: Math.round(fill * 100), booked: Number(booked.toFixed(1)), revenue: Math.round(revenue), rows };
 }
 
+// Shared by the Source Data ranking view and the scheduler's top-performer forcing pass, so "top
+// slot" means exactly the same thing in both places — min-max normalised so it stays meaningful
+// whether ranking 5 slots or 500.
+export function computeComposite<T extends { checkin: number; fill: number }>(groups: T[]): Array<T & { composite: number }> {
+  if (!groups.length) return [];
+  const checkins = groups.map((g) => g.checkin);
+  const fills = groups.map((g) => g.fill);
+  const minC = Math.min(...checkins);
+  const maxC = Math.max(...checkins);
+  const minF = Math.min(...fills);
+  const maxF = Math.max(...fills);
+  const norm = (v: number, lo: number, hi: number) => (hi > lo ? ((v - lo) / (hi - lo)) * 100 : 100);
+  return groups.map((g) => ({ ...g, composite: Math.round(0.5 * norm(g.checkin, minC, maxC) + 0.5 * norm(g.fill, minF, maxF)) }));
+}
+
+// "Historic" for ranking purposes means this calendar year only, strictly before today — last
+// year's numbers (or today's still-incomplete day) shouldn't decide what gets force-scheduled now.
+export function isCurrentYearToDate(dateStr: string): boolean {
+  if (!dateStr) return false;
+  const rowYear = Number(dateStr.slice(0, 4));
+  if (!rowYear || rowYear !== new Date().getFullYear()) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const rowDate = new Date(dateStr);
+  if (Number.isNaN(rowDate.getTime())) return false;
+  return rowDate.getTime() < today.getTime();
+}
+
+export type RankedSlot = {
+  locationId: string;
+  day: number;
+  time: string;
+  className: string;
+  sessions: number;
+  checkin: number;
+  fill: number;
+  composite: number;
+};
+
+// Trainer-agnostic ranking of every location+day+time+class combo actually taught this year to
+// date, aggregated across whichever trainers ran it — the basis for "schedule proven winners
+// first, then find the best available trainer for them," independent of who happened to teach it
+// historically.
+export function rankHistoricSlots(minSessions = 4, locationId?: string): RankedSlot[] {
+  const rows = STORE.filter((r) => isCurrentYearToDate(r.date) && (!locationId || r.locationId === locationId));
+  const groups = new Map<string, PerfRow[]>();
+  for (const r of rows) {
+    const key = uniqueKey1(r.locationId, r.dayKey, r.time, r.className);
+    const list = groups.get(key);
+    if (list) list.push(r);
+    else groups.set(key, [r]);
+  }
+  const ranked: Array<Omit<RankedSlot, "composite">> = [];
+  for (const group of groups.values()) {
+    if (group.length < minSessions) continue;
+    const agg = aggregate(group);
+    const sample = group[0];
+    ranked.push({ locationId: sample.locationId, day: sample.dayKey, time: sample.time, className: sample.className, sessions: agg.sessions, checkin: agg.checkin, fill: agg.fill });
+  }
+  return computeComposite(ranked).sort((a, b) => b.composite - a.composite);
+}
+
 export function matchRows(
   rows: PerfRow[],
   opts: { locationId?: string; dayKey?: number; time?: string; className?: string; trainer?: string }
@@ -230,6 +297,32 @@ export async function loadSnapshotCsv() {
   const res = await fetch(SNAPSHOT_CSV);
   if (!res.ok) throw new Error("Could not load source performance sheet");
   return parseCsv(await res.text());
+}
+
+// Live sync: the `google-token` Supabase Edge Function holds the Google client secret and refresh
+// token server-side (never in client code) and mints a short-lived access token for the signed-in
+// session, which is then used to call the Sheets API directly for this-run-fresh data. Falls back to
+// the static snapshot if the function isn't deployed, the caller isn't signed in yet, or Google is
+// unreachable — never leaves the app without historic data to score against.
+export async function loadPerformanceData(spreadsheetId: string): Promise<PerfRow[]> {
+  try {
+    const client = getClient();
+    if (!client) throw new Error("Supabase not configured");
+    const { data, error } = await client.functions.invoke("google-token");
+    if (error || !data?.access_token) throw new Error(error?.message ?? "No access token returned");
+    return await loadGoogleSheet(data.access_token, spreadsheetId);
+  } catch (liveErr) {
+    // Logged rather than swallowed — a live-sync failure (not signed in yet, function not
+    // reachable, Google error) is expected occasionally and the snapshot fallback below covers it,
+    // but silently losing the reason makes "why is data stale/missing" impossible to diagnose.
+    console.warn("Live Google Sheet sync failed, falling back to static snapshot:", liveErr);
+    try {
+      return await loadSnapshotCsv();
+    } catch (snapshotErr) {
+      console.error("Snapshot fallback also failed:", snapshotErr);
+      throw snapshotErr;
+    }
+  }
 }
 
 let STORE: PerfRow[] = [];

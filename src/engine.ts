@@ -1,5 +1,5 @@
 import { DAYS, FORMAT_PRIORITY, FORMATS, LOCATIONS, TIMES, TRAINERS as BASE_TRAINERS } from "./data";
-import { hasPerformance, lookupAgg } from "./performance";
+import { hasPerformance, lookupAgg, rankHistoricSlots } from "./performance";
 import { overrideBoost } from "./overrides";
 import type { Format, GenReport, Location, Session, Settings, Tag, Trainer } from "./types";
 
@@ -40,6 +40,9 @@ function catalog(settings: Settings) {
 // Fallback defaults used only if settings.limits/bannedFormats is missing (e.g. stale localStorage).
 const FALLBACK_LIMITS = { weeklyCap: 15, dailyHourCap: 4, barreMinShare: 0.25, earliestTime: "07:00", latestTime: "20:30", lunchStart: "13:00", lunchEnd: "15:00", sundayEarliest: "10:00" };
 const FALLBACK_BANNED_FORMATS = ["Foundations", "Studio Foundations", "SWEAT In 30", "Studio SWEAT In 30", "Hosted", "Hosted Class", "Studio Hosted"];
+// A slot needs at least this many current-year-to-date sessions before its historic average is
+// trusted enough to force-schedule ahead of everything else.
+const TOP_SLOT_MIN_SESSIONS = 4;
 function limitsOf(settings: Settings) {
   return settings.limits ?? FALLBACK_LIMITS;
 }
@@ -1319,6 +1322,48 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
     commit(book, trainer, pin.locationId, pin.day, pin.time, format.duration, format.name, room);
   }
 
+  // Proven top performers claim their slot before the generic fill loop even starts — ranked by a
+  // composite of this-year-to-date avg check-in and fill rate (min TOP_SLOT_MIN_SESSIONS sessions,
+  // trainer-agnostic: the slot itself is what's proven, not any one trainer). The best-scoring
+  // available trainer for that exact slot is tried first, then the next best, and so on via the same
+  // canUseTrainer() gate everything else uses. Quality-floor and class-mix gates are deliberately
+  // skipped here — these are proven winners by definition — but certs/hours/leave/room
+  // conflicts/hard custom rules still apply since those are physical or contractual, not quality
+  // heuristics. Marked pinned so no repair/refine pass downstream can remove one.
+  const topSlotNotes: string[] = [];
+  for (const loc of houses(settings)) {
+    for (const slot of rankHistoricSlots(TOP_SLOT_MIN_SESSIONS, loc.id)) {
+      const format = catalog(settings).find((f) => f.name === slot.className);
+      if (!format) continue;
+      if (!formatAllowed(loc.id, format, settings)) continue;
+      if (!allowedTime(slot.day, slot.time, settings) || !allowedEnd(slot.day, slot.time, format.duration)) continue;
+      // Already covered by a pin/external session at this exact slot — nothing left to force.
+      if (sessions.some((s) => s.locationId === loc.id && s.day === slot.day && s.time === slot.time && s.name === format.name)) continue;
+      const room = roomFor(loc.id, format, book, slot.day, slot.time, settings);
+      if (!room) continue;
+      const eligible = roster(settings)
+        .filter((t) => t.certs[format.cert] && t.access[loc.id])
+        .map((t) => ({ trainer: t, score: scoreCombo(historicForFast(loc.id, slot.day, slot.time, format.name, t.name), t, settings, format.name).score }))
+        .sort((a, b) => b.score - a.score);
+      let placed = false;
+      for (const cand of eligible) {
+        if (hardRuleBlocks(settings, loc.id, slot.day, slot.time, format.name, cand.trainer.id)) continue;
+        if (canUseTrainer(cand.trainer, loc.id, slot.day, slot.time, format.duration, format, settings, book)) continue;
+        const s = makeSession(loc.id, slot.day, slot.time, format, cand.trainer, room, settings, ["protected"]);
+        s.pinned = true;
+        sessions.push(s);
+        commit(book, cand.trainer, loc.id, slot.day, slot.time, format.duration, format.name, room);
+        placed = true;
+        break;
+      }
+      if (!placed) {
+        topSlotNotes.push(
+          `${loc.name} · ${DAYS[slot.day].label} ${slot.time} · ${slot.className} — proven top performer (composite ${slot.composite}, ${slot.sessions} sessions this year) could not be scheduled: no eligible trainer.`
+        );
+      }
+    }
+  }
+
   // Reserve PowerCycle/Strength Lab minimums before the generic greedy fill below, which otherwise
   // exhausts the small pool of certified specialist trainers on Barre/Cardio/FIT first and leaves
   // nothing for their own dedicated rooms.
@@ -1461,7 +1506,7 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
     seen.add(k);
     return true;
   });
-  return { sessions: clean, book };
+  return { sessions: clean, book, topSlotNotes };
 }
 
 function evaluate(sessions: Session[], settings: Settings, seed: number, trial: number, trials: number): GenReport {
@@ -1664,6 +1709,7 @@ export function generateSchedule(settings: Settings, seed: number, optimize = fa
     const report = bestReport
       ? { ...evaluate(sessions, settings, seed, picked, trials), pickedTrial: picked }
       : evaluate(sessions, settings, seed, 1, trials);
+    if (best?.topSlotNotes.length) report.notes = [...report.notes, ...best.topSlotNotes];
     return { sessions, report };
   } finally {
     historicCache = null;

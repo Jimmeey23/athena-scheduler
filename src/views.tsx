@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { Area, AreaChart, Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Plus } from "lucide-react";
+import { CheckCircle2, CircleDashed, Plus, Search } from "lucide-react";
 import { DAYS, LOCATIONS, TIMES, daysWithDates, locationById, trainerById, trainerLoad } from "./data";
 import { weekOffDays } from "./engine";
+import { cleanClass, getPerformanceHeaders, getPerformanceRows, type PerfRow } from "./performance";
 import type { Session, Settings } from "./types";
 import { ClassCard, EmptySlot, FillBar, Panel, ScoreRing, TagChip, trainerWeekHours, type CardActions } from "./ui";
 
@@ -1176,5 +1177,807 @@ export function ReportView({ sessions, locationName, all }: { sessions: Session[
         </tbody>
       </table>
     </Panel>
+  );
+}
+
+const SOURCE_PAGE_SIZE = 50;
+const MIN_SESSIONS_DEFAULT = 1;
+const MIN_CHECKINS_DEFAULT = 0;
+
+type GroupMetrics = {
+  key: string;
+  label: string;
+  rows: PerfRow[];
+  sessions: number;
+  emptyClasses: number;
+  nonEmptyClasses: number;
+  avgInclEmpty: number;
+  avgExclEmpty: number;
+  medianCheckin: number;
+  peakCheckin: number;
+  fill: number;
+  avgBooked: number;
+  revenue: number;
+  revenuePerSession: number;
+  revenuePerCheckin: number;
+  lateCancelled: number;
+  checkedInTotal: number;
+  bookedTotal: number;
+};
+
+function median(xs: number[]) {
+  if (!xs.length) return 0;
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function extendedMetrics(rows: PerfRow[]): Omit<GroupMetrics, "key" | "label" | "rows"> {
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const avg = (xs: number[]) => (xs.length ? sum(xs) / xs.length : 0);
+  const sessions = rows.length;
+  const nonEmpty = rows.filter((r) => r.checkedIn > 0);
+  const revenue = sum(rows.map((r) => r.revenue));
+  const checkedInTotal = sum(rows.map((r) => r.checkedIn));
+  const fill = sessions ? avg(rows.map((r) => (r.capacity ? r.checkedIn / r.capacity : 0))) * 100 : 0;
+  return {
+    sessions,
+    emptyClasses: sessions - nonEmpty.length,
+    nonEmptyClasses: nonEmpty.length,
+    avgInclEmpty: Number(avg(rows.map((r) => r.checkedIn)).toFixed(2)),
+    avgExclEmpty: Number(avg(nonEmpty.map((r) => r.checkedIn)).toFixed(2)),
+    medianCheckin: Number(median(rows.map((r) => r.checkedIn)).toFixed(1)),
+    peakCheckin: rows.length ? Math.max(...rows.map((r) => r.checkedIn)) : 0,
+    fill: Math.round(fill),
+    avgBooked: Number(avg(rows.map((r) => r.booked)).toFixed(2)),
+    revenue: Math.round(revenue),
+    revenuePerSession: sessions ? Math.round(revenue / sessions) : 0,
+    revenuePerCheckin: checkedInTotal ? Math.round(revenue / checkedInTotal) : 0,
+    lateCancelled: sum(rows.map((r) => r.lateCancelled)),
+    checkedInTotal,
+    bookedTotal: sum(rows.map((r) => r.booked)),
+  };
+}
+
+function overviewMetrics(rows: PerfRow[]) {
+  const base = extendedMetrics(rows);
+  const uniqueTrainers = new Set(rows.map((r) => r.trainer)).size;
+  const uniqueClasses = new Set(rows.map((r) => cleanClass(r.className))).size;
+  const uniqueLocations = new Set(rows.map((r) => r.locationId)).size;
+  const weeks = new Set(
+    rows
+      .filter((r) => r.date)
+      .map((r) => {
+        const d = new Date(r.date);
+        const onejan = new Date(d.getFullYear(), 0, 1);
+        return `${d.getFullYear()}-${Math.ceil(((d.getTime() - onejan.getTime()) / 86400000 + onejan.getDay() + 1) / 7)}`;
+      })
+  ).size;
+  return { ...base, uniqueTrainers, uniqueClasses, uniqueLocations, avgSessionsPerWeek: weeks ? Number((base.sessions / weeks).toFixed(1)) : base.sessions };
+}
+
+function groupRows(rows: PerfRow[], keyFn: (r: PerfRow) => string, labelFn: (r: PerfRow) => string): GroupMetrics[] {
+  const map = new Map<string, PerfRow[]>();
+  for (const r of rows) {
+    const k = keyFn(r);
+    const list = map.get(k);
+    if (list) list.push(r);
+    else map.set(k, [r]);
+  }
+  return [...map.entries()].map(([key, group]) => ({ key, label: labelFn(group[0]), rows: group, ...extendedMetrics(group) }));
+}
+
+// A composite score lets "top/bottom" ranking reflect both how full a slot runs and how many people
+// actually show up, rather than either alone — min-max normalised across the current group set so it
+// stays meaningful whether you're looking at 5 slots or 500.
+function withComposite<T extends { avgInclEmpty: number; fill: number }>(groups: T[]): Array<T & { composite: number }> {
+  if (!groups.length) return [];
+  const checkins = groups.map((g) => g.avgInclEmpty);
+  const fills = groups.map((g) => g.fill);
+  const minC = Math.min(...checkins);
+  const maxC = Math.max(...checkins);
+  const minF = Math.min(...fills);
+  const maxF = Math.max(...fills);
+  const norm = (v: number, lo: number, hi: number) => (hi > lo ? ((v - lo) / (hi - lo)) * 100 : 100);
+  return groups.map((g) => ({ ...g, composite: Math.round(0.5 * norm(g.avgInclEmpty, minC, maxC) + 0.5 * norm(g.fill, minF, maxF)) }));
+}
+
+function toneClass(score: number) {
+  if (score >= 75) return "text-emerald-700";
+  if (score >= 50) return "text-amber-700";
+  return "text-rose-700";
+}
+
+function toneBg(score: number) {
+  if (score >= 75) return "bg-emerald-500";
+  if (score >= 50) return "bg-amber-500";
+  return "bg-rose-500";
+}
+
+function monthKey(dateStr: string) {
+  return dateStr.slice(0, 7) || "unknown";
+}
+
+function isCurrentlyScheduled(sample: PerfRow, scheduled: Session[], matchTrainer: boolean) {
+  return scheduled.some((s) => {
+    if (s.locationId !== sample.locationId) return false;
+    if (s.day !== sample.dayKey) return false;
+    if (s.time !== sample.time) return false;
+    if (cleanClass(s.name) !== cleanClass(sample.className)) return false;
+    if (matchTrainer && trainerById(s.trainerId).name.toLowerCase() !== sample.trainer.toLowerCase()) return false;
+    return true;
+  });
+}
+
+const ROW_COUNT_OPTIONS = [10, 20, 50, 100, 500, 1000] as const;
+const MEDALS = ["🥇", "🥈", "🥉"];
+
+function ScoreBar({ value }: { value: number }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={`w-7 text-right font-semibold ${toneClass(value)}`}>{value}</span>
+      <div className="h-1.5 w-14 overflow-hidden rounded-full bg-line">
+        <div className={`h-full rounded-full ${toneBg(value)}`} style={{ width: `${Math.max(4, value)}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function RawRowsDrilldown({ rows }: { rows: PerfRow[] }) {
+  return (
+    <div className="max-h-64 overflow-auto rounded-xl bg-white p-2 ring-1 ring-line">
+      <table className="w-full text-left text-[11px]">
+        <thead className="sticky top-0 bg-white">
+          <tr className="text-mist">
+            <th className="py-1 pr-2">Date</th>
+            <th className="pr-2">Location</th>
+            <th className="pr-2">Day</th>
+            <th className="pr-2">Time</th>
+            <th className="pr-2">Class</th>
+            <th className="pr-2">Trainer</th>
+            <th className="pr-2">Cap</th>
+            <th className="pr-2">Checked in</th>
+            <th className="pr-2">Late cancel</th>
+            <th className="pr-2">Booked</th>
+            <th>Revenue</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-line">
+          {rows.map((r, i) => (
+            <tr key={`${r.uniqueId2}-${i}`} className="even:bg-ink/40">
+              <td className="py-1 pr-2">{r.date}</td>
+              <td className="pr-2">{r.location}</td>
+              <td className="pr-2">{r.day}</td>
+              <td className="pr-2">{r.time}</td>
+              <td className="pr-2">{cleanClass(r.className)}</td>
+              <td className="pr-2">{r.trainer}</td>
+              <td className="pr-2">{r.capacity}</td>
+              <td className="pr-2">{r.checkedIn}</td>
+              <td className="pr-2">{r.lateCancelled}</td>
+              <td className="pr-2">{r.booked}</td>
+              <td>₹{Math.round(r.revenue).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function GroupedMetricsTable({ groups, title }: { groups: GroupMetrics[]; title: string }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  return (
+    <Panel className="p-5">
+      <h3 className="mb-3 font-serif text-xl">{title}</h3>
+      <div className="max-h-[560px] overflow-auto rounded-xl ring-1 ring-line">
+        <table className="w-full text-left text-xs">
+          <thead className="sticky top-0 z-10 bg-white">
+            <tr className="text-[10px] uppercase tracking-wider text-mist">
+              <th className="py-2 pl-3 pr-2"></th>
+              <th className="pr-2">Group</th>
+              <th className="pr-2">Sessions</th>
+              <th className="pr-2">Empty</th>
+              <th className="pr-2">Non-empty</th>
+              <th className="pr-2">Avg (incl.)</th>
+              <th className="pr-2">Avg (excl.)</th>
+              <th className="pr-2">Median</th>
+              <th className="pr-2">Peak</th>
+              <th className="pr-2">Fill</th>
+              <th className="pr-2">Booked</th>
+              <th className="pr-2">Late cancel</th>
+              <th className="pr-2">Revenue</th>
+              <th className="pr-2">₹/session</th>
+              <th className="pr-3">₹/check-in</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {groups.map((g) => (
+              <Fragment key={g.key}>
+                <tr className="cursor-pointer even:bg-ink/40 hover:bg-ink" onClick={() => toggle(g.key)}>
+                  <td className="py-1.5 pl-3 pr-2 text-mist">{expanded.has(g.key) ? "▾" : "▸"}</td>
+                  <td className="pr-2 font-medium">{g.label}</td>
+                  <td className="pr-2">{g.sessions}</td>
+                  <td className="pr-2">{g.emptyClasses}</td>
+                  <td className="pr-2">{g.nonEmptyClasses}</td>
+                  <td className="pr-2">{g.avgInclEmpty}</td>
+                  <td className="pr-2">{g.avgExclEmpty}</td>
+                  <td className="pr-2">{g.medianCheckin}</td>
+                  <td className="pr-2">{g.peakCheckin}</td>
+                  <td className={`pr-2 font-medium ${toneClass(g.fill)}`}>{g.fill}%</td>
+                  <td className="pr-2">{g.avgBooked}</td>
+                  <td className="pr-2">{g.lateCancelled}</td>
+                  <td className="pr-2">₹{g.revenue.toLocaleString()}</td>
+                  <td className="pr-2">₹{g.revenuePerSession.toLocaleString()}</td>
+                  <td className="pr-3">₹{g.revenuePerCheckin.toLocaleString()}</td>
+                </tr>
+                {expanded.has(g.key) && (
+                  <tr>
+                    <td colSpan={15} className="p-2">
+                      <RawRowsDrilldown rows={g.rows} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            ))}
+            {!groups.length && (
+              <tr>
+                <td colSpan={15} className="py-6 text-center text-mist">
+                  No groups match the current filters.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+function RankingTable({
+  title,
+  allGroups,
+  matchTrainer,
+  scheduledSessions,
+}: {
+  title: string;
+  allGroups: Array<GroupMetrics & { composite: number }>;
+  matchTrainer: boolean;
+  scheduledSessions: Session[];
+}) {
+  const [n, setN] = useState<(typeof ROW_COUNT_OPTIONS)[number]>(10);
+  const [side, setSide] = useState<"top" | "bottom">("top");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const sorted = [...allGroups].sort((a, b) => b.composite - a.composite);
+  const list = side === "top" ? sorted.slice(0, n) : sorted.slice(-n).reverse();
+  const rankOf = (i: number) => (side === "top" ? i + 1 : sorted.length - i);
+
+  return (
+    <Panel className="p-5">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h3 className="font-serif text-xl">{title}</h3>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-full bg-ink p-0.5 text-xs">
+            <button
+              onClick={() => setSide("top")}
+              className={`rounded-full px-3 py-1 transition ${side === "top" ? "bg-emerald-600 text-white" : "text-mist hover:text-ivory"}`}
+            >
+              Top
+            </button>
+            <button
+              onClick={() => setSide("bottom")}
+              className={`rounded-full px-3 py-1 transition ${side === "bottom" ? "bg-rose-600 text-white" : "text-mist hover:text-ivory"}`}
+            >
+              Bottom
+            </button>
+          </div>
+          <select
+            value={n}
+            onChange={(e) => setN(Number(e.target.value) as (typeof ROW_COUNT_OPTIONS)[number])}
+            className="rounded-lg border border-line bg-white px-2 py-1 text-xs text-ivory"
+          >
+            {ROW_COUNT_OPTIONS.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <p className="mb-2 text-[10px] uppercase tracking-wider text-mist">
+        {side === "top" ? "Top" : "Bottom"} {Math.min(n, list.length)} of {sorted.length} · ranked by composite (avg check-in + fill, normalised)
+      </p>
+      <div className="max-h-[560px] overflow-auto rounded-xl ring-1 ring-line">
+        <table className="w-full text-left text-xs">
+          <thead className="sticky top-0 z-10 bg-white">
+            <tr className="text-[10px] uppercase tracking-wider text-mist">
+              <th className="py-2 pl-3 pr-2">#</th>
+              <th className="pr-2"></th>
+              <th className="pr-2">Live</th>
+              <th className="pr-2">Slot</th>
+              <th className="pr-2">Score</th>
+              <th className="pr-2">Sessions</th>
+              <th className="pr-2">Avg (incl.)</th>
+              <th className="pr-2">Avg (excl.)</th>
+              <th className="pr-2">Median</th>
+              <th className="pr-2">Peak</th>
+              <th className="pr-2">Fill</th>
+              <th className="pr-2">Empty</th>
+              <th className="pr-2">Revenue</th>
+              <th className="pr-3">₹/session</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {list.map((g, i) => {
+              const live = isCurrentlyScheduled(g.rows[0], scheduledSessions, matchTrainer);
+              const rank = rankOf(i);
+              return (
+                <Fragment key={g.key}>
+                  <tr className="cursor-pointer even:bg-ink/40 hover:bg-ink" onClick={() => toggle(g.key)}>
+                    <td className="py-1.5 pl-3 pr-2 text-mist">{side === "top" && rank <= 3 ? MEDALS[rank - 1] : rank}</td>
+                    <td className="pr-2 text-mist">{expanded.has(g.key) ? "▾" : "▸"}</td>
+                    <td className="pr-2" title={live ? "Currently in the live schedule" : "Not currently scheduled"}>
+                      {live ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" /> : <CircleDashed className="h-3.5 w-3.5 text-mist" />}
+                    </td>
+                    <td className="pr-2 font-medium">{g.label}</td>
+                    <td className="pr-2"><ScoreBar value={g.composite} /></td>
+                    <td className="pr-2">{g.sessions}</td>
+                    <td className="pr-2">{g.avgInclEmpty}</td>
+                    <td className="pr-2">{g.avgExclEmpty}</td>
+                    <td className="pr-2">{g.medianCheckin}</td>
+                    <td className="pr-2">{g.peakCheckin}</td>
+                    <td className={`pr-2 ${toneClass(g.fill)}`}>{g.fill}%</td>
+                    <td className="pr-2">{g.emptyClasses}</td>
+                    <td className="pr-2">₹{g.revenue.toLocaleString()}</td>
+                    <td className="pr-3">₹{g.revenuePerSession.toLocaleString()}</td>
+                  </tr>
+                  {expanded.has(g.key) && (
+                    <tr>
+                      <td colSpan={14} className="p-2">
+                        <RawRowsDrilldown rows={g.rows} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+            {!list.length && (
+              <tr>
+                <td colSpan={14} className="py-4 text-center text-mist">
+                  No slots qualify with the current min-sessions / min-check-ins criteria.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+function MonthlyTable({ rows }: { rows: PerfRow[] }) {
+  const months = useMemo(() => {
+    const grouped = groupRows(rows, (r) => monthKey(r.date), (r) => monthKey(r.date));
+    return grouped
+      .filter((m) => m.key !== "unknown")
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .map((m, i, arr) => {
+        const prev = arr[i - 1];
+        const pctChange = (curr: number, before?: number) => (before ? Math.round(((curr - before) / before) * 100) : null);
+        return {
+          ...m,
+          sessionsDelta: pctChange(m.sessions, prev?.sessions),
+          revenueDelta: pctChange(m.revenue, prev?.revenue),
+          checkinDelta: pctChange(m.avgInclEmpty, prev?.avgInclEmpty),
+        };
+      });
+  }, [rows]);
+
+  const Delta = ({ v }: { v: number | null }) => {
+    if (v == null) return <span className="text-mist">—</span>;
+    const cls = v > 0 ? "text-emerald-700" : v < 0 ? "text-rose-700" : "text-mist";
+    const arrow = v > 0 ? "▲" : v < 0 ? "▼" : "•";
+    return <span className={cls}>{arrow} {Math.abs(v)}%</span>;
+  };
+
+  const latest = months[months.length - 1];
+
+  return (
+    <Panel className="p-5">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="font-serif text-xl">Month on month</h3>
+        {latest && (
+          <p className="text-[11px] text-mist">
+            Most recent month with data: <span className="font-medium text-ivory">{latest.key}</span> — if you expect newer months, the source data itself hasn't been refreshed past this point.
+          </p>
+        )}
+      </div>
+      <div className="max-h-[560px] overflow-auto rounded-xl ring-1 ring-line">
+        <table className="w-full text-left text-xs">
+          <thead className="sticky top-0 z-10 bg-white">
+            <tr className="text-[10px] uppercase tracking-wider text-mist">
+              <th className="py-2 pl-3 pr-2">Month</th>
+              <th className="pr-2">Sessions</th>
+              <th className="pr-2">vs prior</th>
+              <th className="pr-2">Empty</th>
+              <th className="pr-2">Non-empty</th>
+              <th className="pr-2">Avg (incl.)</th>
+              <th className="pr-2">vs prior</th>
+              <th className="pr-2">Avg (excl.)</th>
+              <th className="pr-2">Median</th>
+              <th className="pr-2">Fill</th>
+              <th className="pr-2">Booked</th>
+              <th className="pr-2">Late cancel</th>
+              <th className="pr-2">Revenue</th>
+              <th className="pr-2">vs prior</th>
+              <th className="pr-2">₹/session</th>
+              <th className="pr-3">₹/check-in</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {months.map((m) => (
+              <tr key={m.key} className="even:bg-ink/40">
+                <td className="py-1.5 pl-3 pr-2 font-medium">{m.key}</td>
+                <td className="pr-2">{m.sessions}</td>
+                <td className="pr-2"><Delta v={m.sessionsDelta} /></td>
+                <td className="pr-2">{m.emptyClasses}</td>
+                <td className="pr-2">{m.nonEmptyClasses}</td>
+                <td className="pr-2">{m.avgInclEmpty}</td>
+                <td className="pr-2"><Delta v={m.checkinDelta} /></td>
+                <td className="pr-2">{m.avgExclEmpty}</td>
+                <td className="pr-2">{m.medianCheckin}</td>
+                <td className={`pr-2 ${toneClass(m.fill)}`}>{m.fill}%</td>
+                <td className="pr-2">{m.avgBooked}</td>
+                <td className="pr-2">{m.lateCancelled}</td>
+                <td className="pr-2">₹{m.revenue.toLocaleString()}</td>
+                <td className="pr-2"><Delta v={m.revenueDelta} /></td>
+                <td className="pr-2">₹{m.revenuePerSession.toLocaleString()}</td>
+                <td className="pr-3">₹{m.revenuePerCheckin.toLocaleString()}</td>
+              </tr>
+            ))}
+            {!months.length && (
+              <tr>
+                <td colSpan={16} className="py-6 text-center text-mist">
+                  No dated rows match the current filters.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+const GROUP_BY_OPTIONS = ["none", "location", "class", "trainer", "day", "time"] as const;
+type GroupBy = (typeof GROUP_BY_OPTIONS)[number];
+
+const SOURCE_TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "raw", label: "Raw Data" },
+  { id: "grouped", label: "Grouped" },
+  { id: "monthly", label: "Month on Month" },
+  { id: "rankings", label: "Rankings" },
+] as const;
+type SourceTab = (typeof SOURCE_TABS)[number]["id"];
+
+export function SourceDataView({ allowedLocationIds, scheduledSessions }: { allowedLocationIds: string[]; scheduledSessions: Session[] }) {
+  const currentYear = String(new Date().getFullYear());
+  const [tab, setTab] = useState<SourceTab>("overview");
+  const [q, setQ] = useState("");
+  const [page, setPage] = useState(0);
+  const [locFilter, setLocFilter] = useState("");
+  const [dayFilter, setDayFilter] = useState("");
+  const [trainerFilter, setTrainerFilter] = useState("");
+  const [classFilter, setClassFilter] = useState("");
+  const [yearFilter, setYearFilter] = useState(currentYear);
+  const [groupBy, setGroupBy] = useState<GroupBy>("location");
+  const [minSessions, setMinSessions] = useState(MIN_SESSIONS_DEFAULT);
+  const [minCheckins, setMinCheckins] = useState(MIN_CHECKINS_DEFAULT);
+
+  // Hosted/Foundations/SWEAT rows never even enter the performance store — excluded at parse time
+  // in performance.ts — so nothing here needs to filter them out again.
+  const scopedRows = useMemo(() => getPerformanceRows().filter((r) => allowedLocationIds.includes(r.locationId)), [allowedLocationIds]);
+
+  const yearOptions = useMemo(() => [...new Set(scopedRows.map((r) => r.date.slice(0, 4)).filter(Boolean))].sort().reverse(), [scopedRows]);
+  const locationOptions = useMemo(() => LOCATIONS.filter((l) => allowedLocationIds.includes(l.id)), [allowedLocationIds]);
+  const trainerOptions = useMemo(() => [...new Set(scopedRows.map((r) => r.trainer))].sort(), [scopedRows]);
+  const classOptions = useMemo(() => [...new Set(scopedRows.map((r) => cleanClass(r.className)))].sort(), [scopedRows]);
+  const headers = useMemo(() => getPerformanceHeaders(), [scopedRows]);
+  const latestDataMonth = useMemo(() => scopedRows.reduce((max, r) => (r.date > max ? r.date : max), "").slice(0, 7), [scopedRows]);
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return scopedRows.filter((r) => {
+      if (yearFilter !== "all" && !r.date.startsWith(yearFilter)) return false;
+      if (locFilter && r.locationId !== locFilter) return false;
+      if (dayFilter && String(r.dayKey) !== dayFilter) return false;
+      if (trainerFilter && r.trainer !== trainerFilter) return false;
+      if (classFilter && cleanClass(r.className) !== classFilter) return false;
+      if (needle) {
+        const hit =
+          r.trainer.toLowerCase().includes(needle) ||
+          cleanClass(r.className).toLowerCase().includes(needle) ||
+          r.location.toLowerCase().includes(needle);
+        if (!hit) return false;
+      }
+      return true;
+    });
+  }, [scopedRows, q, locFilter, dayFilter, trainerFilter, classFilter, yearFilter]);
+
+  const summary = useMemo(() => overviewMetrics(filtered), [filtered]);
+
+  const groups = useMemo(() => {
+    switch (groupBy) {
+      case "location":
+        return groupRows(filtered, (r) => r.locationId, (r) => r.location);
+      case "class":
+        return groupRows(filtered, (r) => cleanClass(r.className), (r) => cleanClass(r.className));
+      case "trainer":
+        return groupRows(filtered, (r) => r.trainer, (r) => r.trainer);
+      case "day":
+        return groupRows(filtered, (r) => String(r.dayKey), (r) => r.day);
+      case "time":
+        return groupRows(filtered, (r) => r.time, (r) => r.time);
+      default:
+        return [];
+    }
+  }, [filtered, groupBy]);
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / SOURCE_PAGE_SIZE));
+  const clampedPage = Math.min(page, pageCount - 1);
+  const paged = filtered.slice(clampedPage * SOURCE_PAGE_SIZE, (clampedPage + 1) * SOURCE_PAGE_SIZE);
+
+  const qualifies = (g: GroupMetrics) => g.sessions >= minSessions && g.avgInclEmpty >= minCheckins;
+
+  const bySlot = useMemo(
+    () =>
+      withComposite(
+        groupRows(filtered, (r) => r.uniqueId1, (r) => `${r.location} · ${r.day} ${r.time} · ${cleanClass(r.className)}`).filter(qualifies)
+      ),
+    [filtered, minSessions, minCheckins]
+  );
+  const bySlotTrainer = useMemo(
+    () =>
+      withComposite(
+        groupRows(
+          filtered,
+          (r) => r.uniqueId2,
+          (r) => `${r.location} · ${r.day} ${r.time} · ${cleanClass(r.className)} · ${r.trainer}`
+        ).filter(qualifies)
+      ),
+    [filtered, minSessions, minCheckins]
+  );
+
+  const metrics = [
+    { label: "Sessions", value: summary.sessions.toLocaleString() },
+    { label: "Empty classes", value: summary.emptyClasses.toLocaleString() },
+    { label: "Non-empty classes", value: summary.nonEmptyClasses.toLocaleString() },
+    { label: "Avg (incl. empty)", value: summary.avgInclEmpty },
+    { label: "Avg (excl. empty)", value: summary.avgExclEmpty },
+    { label: "Median check-in", value: summary.medianCheckin },
+    { label: "Peak check-in", value: summary.peakCheckin },
+    { label: "Avg fill", value: `${summary.fill}%` },
+    { label: "Total checked in", value: summary.checkedInTotal.toLocaleString() },
+    { label: "Total booked", value: summary.bookedTotal.toLocaleString() },
+    { label: "Avg booked/session", value: summary.avgBooked },
+    { label: "Late cancellations", value: summary.lateCancelled.toLocaleString() },
+    { label: "Total revenue", value: `₹${summary.revenue.toLocaleString()}` },
+    { label: "Revenue/session", value: `₹${summary.revenuePerSession.toLocaleString()}` },
+    { label: "Revenue/check-in", value: `₹${summary.revenuePerCheckin.toLocaleString()}` },
+    { label: "Unique classes", value: summary.uniqueClasses },
+    { label: "Unique trainers", value: summary.uniqueTrainers },
+    { label: "Avg sessions/week", value: summary.avgSessionsPerWeek },
+  ];
+
+  const filterBar = (
+    <Panel className="p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={yearFilter} onChange={(e) => { setYearFilter(e.target.value); setPage(0); }} className="rounded-lg border border-line bg-white px-2 py-1.5 text-xs text-ivory">
+          <option value="all">All years</option>
+          {(yearOptions.includes(currentYear) ? yearOptions : [currentYear, ...yearOptions]).map((y) => (
+            <option key={y} value={y}>{y}</option>
+          ))}
+        </select>
+        <select value={locFilter} onChange={(e) => { setLocFilter(e.target.value); setPage(0); }} className="rounded-lg border border-line bg-white px-2 py-1.5 text-xs text-ivory">
+          <option value="">All locations</option>
+          {locationOptions.map((l) => (
+            <option key={l.id} value={l.id}>{l.name}</option>
+          ))}
+        </select>
+        <select value={dayFilter} onChange={(e) => { setDayFilter(e.target.value); setPage(0); }} className="rounded-lg border border-line bg-white px-2 py-1.5 text-xs text-ivory">
+          <option value="">All days</option>
+          {DAYS.map((d) => (
+            <option key={d.key} value={d.key}>{d.label}</option>
+          ))}
+        </select>
+        <select value={trainerFilter} onChange={(e) => { setTrainerFilter(e.target.value); setPage(0); }} className="rounded-lg border border-line bg-white px-2 py-1.5 text-xs text-ivory">
+          <option value="">All trainers</option>
+          {trainerOptions.map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+        <select value={classFilter} onChange={(e) => { setClassFilter(e.target.value); setPage(0); }} className="rounded-lg border border-line bg-white px-2 py-1.5 text-xs text-ivory">
+          <option value="">All classes</option>
+          {classOptions.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+        <div className="flex items-center gap-1.5 rounded-xl border border-line px-2 py-1.5">
+          <Search className="h-3.5 w-3.5 text-mist" />
+          <input
+            value={q}
+            onChange={(e) => { setQ(e.target.value); setPage(0); }}
+            placeholder="Search trainer, class, location…"
+            className="w-40 bg-transparent text-xs outline-none"
+          />
+        </div>
+        {(locFilter || dayFilter || trainerFilter || classFilter || q || yearFilter !== currentYear) && (
+          <button
+            onClick={() => { setLocFilter(""); setDayFilter(""); setTrainerFilter(""); setClassFilter(""); setQ(""); setYearFilter(currentYear); setPage(0); }}
+            className="rounded-lg border border-line px-2.5 py-1.5 text-xs text-mist hover:text-ivory"
+          >
+            Reset filters
+          </button>
+        )}
+        <p className="ml-auto text-[11px] text-mist">
+          {filtered.length.toLocaleString()} rows{latestDataMonth ? ` · latest data: ${latestDataMonth}` : ""}
+        </p>
+      </div>
+    </Panel>
+  );
+
+  return (
+    <div className="space-y-4 overflow-auto pb-8">
+      <Panel className="p-5">
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="font-serif text-2xl">Source data</h2>
+            <p className="text-sm text-mist">
+              Raw sessions from the source performance sheet — reference only, not editable here. Hosted/Foundations/SWEAT are excluded
+              throughout, same as scheduling.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {SOURCE_TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`rounded-full px-3.5 py-1.5 text-sm transition ${
+                tab === t.id ? "bg-gold text-white" : "bg-white text-mist ring-1 ring-line hover:text-ivory"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </Panel>
+
+      {filterBar}
+
+      {tab === "overview" && (
+        <Panel className="p-5">
+          <h3 className="mb-3 font-serif text-xl">Metrics</h3>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            {metrics.map((m) => (
+              <div key={m.label} className="rounded-2xl bg-ink p-3 text-center ring-1 ring-line">
+                <p className="font-serif text-xl">{m.value}</p>
+                <p className="mt-0.5 text-[10px] uppercase tracking-wider text-mist">{m.label}</p>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      {tab === "raw" && (
+        <Panel className="p-5">
+          <h3 className="mb-3 font-serif text-xl">Raw sessions</h3>
+          <div className="max-h-[600px] overflow-auto rounded-xl ring-1 ring-line">
+            <table className="w-full text-left text-xs">
+              <thead className="sticky top-0 z-10 bg-white">
+                <tr className="text-[10px] uppercase tracking-wider text-mist">
+                  {headers.map((h) => (
+                    <th key={h} className="whitespace-nowrap py-2 pl-3 pr-4 first:pl-3">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line">
+                {paged.map((r, i) => (
+                  <tr key={`${r.uniqueId2}-${i}`} className="even:bg-ink/40">
+                    {headers.map((h) => (
+                      <td key={h} className="whitespace-nowrap py-1.5 pl-3 pr-4 first:pl-3">{r.raw[h] ?? ""}</td>
+                    ))}
+                  </tr>
+                ))}
+                {!paged.length && (
+                  <tr>
+                    <td colSpan={headers.length || 1} className="py-6 text-center text-mist">
+                      No rows match the current filters.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-3 flex items-center justify-between text-xs text-mist">
+            <span>
+              {filtered.length.toLocaleString()} rows · page {clampedPage + 1} of {pageCount}
+            </span>
+            <div className="flex gap-2">
+              <button disabled={clampedPage === 0} onClick={() => setPage((p) => Math.max(0, p - 1))} className="rounded-lg border border-line px-2.5 py-1 disabled:opacity-40">
+                Prev
+              </button>
+              <button disabled={clampedPage >= pageCount - 1} onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))} className="rounded-lg border border-line px-2.5 py-1 disabled:opacity-40">
+                Next
+              </button>
+            </div>
+          </div>
+        </Panel>
+      )}
+
+      {tab === "grouped" && (
+        <>
+          <Panel className="p-4">
+            <label className="flex items-center gap-2 text-xs text-mist">
+              Group by
+              <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)} className="rounded-lg border border-line bg-white px-2 py-1.5 text-xs text-ivory">
+                {GROUP_BY_OPTIONS.filter((g) => g !== "none").map((g) => (
+                  <option key={g} value={g}>{g[0].toUpperCase() + g.slice(1)}</option>
+                ))}
+              </select>
+            </label>
+          </Panel>
+          <GroupedMetricsTable groups={[...groups].sort((a, b) => b.sessions - a.sessions)} title={`Grouped by ${groupBy}`} />
+        </>
+      )}
+
+      {tab === "monthly" && <MonthlyTable rows={filtered} />}
+
+      {tab === "rankings" && (
+        <>
+          <Panel className="p-4">
+            <div className="flex flex-wrap items-center gap-4">
+              <p className="text-xs font-medium uppercase tracking-wider text-mist">Ranking qualification</p>
+              <label className="flex items-center gap-2 text-xs text-mist">
+                Min sessions
+                <input
+                  type="number"
+                  min={0}
+                  value={minSessions}
+                  onChange={(e) => setMinSessions(Math.max(0, Number(e.target.value)))}
+                  className="w-16 rounded-lg border border-line bg-white px-2 py-1 text-xs text-ivory"
+                />
+              </label>
+              <label className="flex items-center gap-2 text-xs text-mist">
+                Min avg check-ins
+                <input
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  value={minCheckins}
+                  onChange={(e) => setMinCheckins(Math.max(0, Number(e.target.value)))}
+                  className="w-16 rounded-lg border border-line bg-white px-2 py-1 text-xs text-ivory"
+                />
+              </label>
+              <p className="text-[11px] text-mist">Applies to both tables below — slots below either threshold are excluded entirely.</p>
+            </div>
+          </Panel>
+          <RankingTable title="By slot (house · day · time · class)" allGroups={bySlot} matchTrainer={false} scheduledSessions={scheduledSessions} />
+          <RankingTable title="By slot + trainer (house · day · time · class · trainer)" allGroups={bySlotTrainer} matchTrainer scheduledSessions={scheduledSessions} />
+        </>
+      )}
+    </div>
   );
 }
