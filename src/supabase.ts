@@ -18,6 +18,10 @@ export function hasSupabase() {
   return Boolean(client);
 }
 
+export function getClient() {
+  return client;
+}
+
 export async function persistCloud(payload: { settings?: unknown; drafts?: Draft[]; sessions?: Session[] }) {
   if (!client) return;
   try {

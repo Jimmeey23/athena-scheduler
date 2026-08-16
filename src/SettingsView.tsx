@@ -53,18 +53,25 @@ export function SettingsView({
   settings,
   setSettings,
   onSave,
+  allowedLocationIds,
 }: {
   settings: Settings;
   setSettings: (s: Settings) => void;
   onSave: () => void;
+  allowedLocationIds: string[];
 }) {
   const [section, setSection] = useState("trainers");
   const [q, setQ] = useState("");
   const patch = (partial: Partial<Settings>) => setSettings({ ...settings, ...partial });
   const roster = settings.trainers?.length ? settings.trainers : TRAINERS;
-  const trainers = roster.filter((t) => t.name.toLowerCase().includes(q.toLowerCase()));
+  // A trainer with no access entry in any of this account's allowed locations never trains at a
+  // studio it can see — hidden everywhere a trainer list is shown (roster, certs, leave, rules).
+  const trainers = roster.filter(
+    (t) => t.name.toLowerCase().includes(q.toLowerCase()) && Object.keys(t.access).some((locId) => allowedLocationIds.includes(locId))
+  );
   const updateTrainer = (id: string, next: (typeof roster)[number]) => patch({ trainers: roster.map((t) => (t.id === id ? next : t)) });
   const formatList = settings.formats?.length ? settings.formats : FORMATS;
+  const scopedLocations = LOCATIONS.filter((l) => allowedLocationIds.includes(l.id));
 
   return (
     <div className="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
@@ -228,7 +235,7 @@ export function SettingsView({
                         </td>
                         <td>
                           <div className="flex flex-wrap gap-1">
-                            {(settings.locations?.length ? settings.locations : LOCATIONS).map((h) => {
+                            {(settings.locations?.length ? settings.locations.filter((l) => allowedLocationIds.includes(l.id)) : scopedLocations).map((h) => {
                               const on = Boolean(t.access[h.id]);
                               return (
                                 <button
@@ -457,7 +464,7 @@ export function SettingsView({
                 ))}
                 {!settings.leave.length && <p className="text-sm text-mist">No leave entries.</p>}
               </div>
-              <NewLeaveForm roster={roster} onAdd={(trainerId, days) => {
+              <NewLeaveForm roster={trainers} onAdd={(trainerId, days) => {
                 const existing = settings.leave.find((l) => l.trainerId === trainerId);
                 const merged = Array.from(new Set([...(existing?.days ?? []), ...days]));
                 patch({ leave: [...settings.leave.filter((l) => l.trainerId !== trainerId), { trainerId, days: merged }] });
@@ -467,7 +474,7 @@ export function SettingsView({
               <h2 className="font-serif text-2xl">Off days</h2>
               <p className="mb-4 text-sm text-mist">Binding for this week. Off days stack on top of historic week-off.</p>
               <div className="space-y-3">
-                {TRAINERS.map((t) => {
+                {trainers.map((t) => {
                 const row = settings.offDays.find((o) => o.trainerId === t.id);
                 return (
                   <div key={t.id} className="flex flex-wrap items-center gap-2 rounded-2xl bg-ink px-3 py-2">
@@ -501,7 +508,7 @@ export function SettingsView({
           <Panel className="overflow-x-auto p-5">
             <h2 className="font-serif text-2xl">Daily targets</h2>
             <p className="mb-4 text-sm text-mist">Exact daily targets with a max cap. Generator never exceeds max and repairs underfilled days.</p>
-            {LOCATIONS.map((loc) => (
+            {scopedLocations.map((loc) => (
               <div key={loc.id} className="mb-5">
                 <p className="mb-2 text-sm font-medium">
                   {loc.name} <span className="text-mist">floor {loc.weeklyFloor}</span>
@@ -689,7 +696,7 @@ export function SettingsView({
           <Panel className="p-5">
             <h2 className="font-serif text-2xl">Class mix</h2>
             <p className="mb-4 text-sm text-mist">Weekly min / max per format. Barre family must still stay ≥ 25% universally.</p>
-            {LOCATIONS.map((loc) => (
+            {scopedLocations.map((loc) => (
               <div key={loc.id} className="mb-5">
                 <p className="mb-2 text-sm font-medium">{loc.name}</p>
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -739,7 +746,7 @@ export function SettingsView({
         )}
 
         {section === "rules" && (
-          <RulesPanel settings={settings} patch={patch} />
+          <RulesPanel settings={settings} patch={patch} trainers={trainers} allowedLocationIds={allowedLocationIds} />
         )}
 
         {section === "pins" && (
@@ -747,7 +754,7 @@ export function SettingsView({
             <h2 className="font-serif text-2xl">Pinned classes</h2>
             <p className="mb-4 text-sm text-mist">Pins are placed first and bypass quality gates. They still respect leave and hour caps.</p>
             <div className="space-y-2">
-              {settings.pins.map((p) => (
+              {settings.pins.filter((p) => allowedLocationIds.includes(p.locationId)).map((p) => (
                 <div key={p.id} className="flex flex-wrap items-center gap-3 rounded-2xl bg-ink px-3 py-2 text-sm">
                   <button
                     onClick={() => patch({ pins: settings.pins.map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x)) })}
@@ -920,7 +927,7 @@ export function SettingsView({
                 Reset locations to defaults
               </button>
             </div>
-            {(settings.locations?.length ? settings.locations : LOCATIONS).map((l) => {
+            {(settings.locations?.length ? settings.locations : LOCATIONS).filter((l) => allowedLocationIds.includes(l.id)).map((l) => {
               const updateLoc = (patchLoc: Partial<(typeof LOCATIONS)[number]>) =>
                 patch({
                   locations: (settings.locations?.length ? settings.locations : LOCATIONS).map((x) => (x.id === l.id ? { ...x, ...patchLoc } : x)),
@@ -987,13 +994,25 @@ function Num({ label, value, onChange, step = 1 }: { label: string; value: numbe
   );
 }
 
-function RulesPanel({ settings, patch }: { settings: Settings; patch: (p: Partial<Settings>) => void }) {
+function RulesPanel({
+  settings,
+  patch,
+  trainers,
+  allowedLocationIds,
+}: {
+  settings: Settings;
+  patch: (p: Partial<Settings>) => void;
+  trainers: Array<{ id: string; name: string }>;
+  allowedLocationIds: string[];
+}) {
   const [draft, setDraft] = useState<Partial<CustomRule>>({
     ruleType: "weekly_class_mix",
     operator: "max",
     priority: "hard",
     value: 1,
   });
+  const isAdmin = allowedLocationIds.length === LOCATIONS.length;
+  const scopedLocations = LOCATIONS.filter((l) => allowedLocationIds.includes(l.id));
   return (
     <Panel className="p-5">
       <h2 className="font-serif text-2xl">Custom rules</h2>
@@ -1008,15 +1027,17 @@ function RulesPanel({ settings, patch }: { settings: Settings; patch: (p: Partia
         </select>
         <select className="rounded-xl border border-line bg-ink px-3 py-2 text-sm" value={draft.trainer ?? ""} onChange={(e) => setDraft({ ...draft, trainer: e.target.value || undefined })}>
           <option value="">Any trainer</option>
-          {TRAINERS.map((t) => (
+          {trainers.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name}
             </option>
           ))}
         </select>
         <select className="rounded-xl border border-line bg-ink px-3 py-2 text-sm" value={draft.location ?? ""} onChange={(e) => setDraft({ ...draft, location: e.target.value || undefined })}>
-          <option value="">All houses</option>
-          {LOCATIONS.map((l) => (
+          {/* A branch account never gets to pick "all houses" — that would create a rule that also
+              reaches into locations it can't see. */}
+          {isAdmin && <option value="">All houses</option>}
+          {scopedLocations.map((l) => (
             <option key={l.id} value={l.id}>
               {l.name}
             </option>
@@ -1064,7 +1085,7 @@ function RulesPanel({ settings, patch }: { settings: Settings; patch: (p: Partia
         Add rule
       </button>
       <div className="mt-4 space-y-2">
-        {settings.customRules.map((r) => (
+        {settings.customRules.filter((r) => !r.location || allowedLocationIds.includes(r.location)).map((r) => (
           <div key={r.id} className="flex items-center gap-3 rounded-2xl bg-ink px-3 py-2 text-sm">
             <span className={`rounded-full px-2 py-0.5 text-[10px] uppercase ${r.priority === "hard" ? "bg-rose-100 text-rose-700" : "bg-sky-100 text-sky-800"}`}>{r.priority}</span>
             <span>

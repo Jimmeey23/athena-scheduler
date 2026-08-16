@@ -11,6 +11,7 @@ import {
   History,
   LayoutGrid,
   List,
+  LogOut,
   Map,
   Moon,
   Search,
@@ -50,7 +51,11 @@ import { Chatbot } from "./Chatbot";
 import { applyHistoricCerts, hasPerformance, loadSnapshotCsv, setPerformanceRows } from "./performance";
 import { loadCloud, persistCloud, persistSchedule, loadSchedule, finalizeSchedule, loadFinalizedSchedule } from "./supabase";
 import { recordOverride } from "./overrides";
-import { exportCSV, exportHTML, exportJSON, exportPDF, exportPNG } from "./export";import {
+import { exportCSV, exportHTML, exportJSON, exportPDF, exportPNG } from "./export";
+import { useAuth } from "./AuthProvider";
+import { signOut } from "./auth";
+import { LoginView } from "./LoginView";
+import {
   AnalyticsView,
   CityView,
   ControlView,
@@ -131,6 +136,7 @@ function formatIconFor(name: string) {
 }
 
 export default function App() {
+  const { session, profile, loading: authLoading, authError } = useAuth();
   const [locationId, setLocationId] = useState("kwality");
   const [view, setView] = useState<ViewId>("grid");
   const [query, setQuery] = useState("");
@@ -193,6 +199,21 @@ export default function App() {
     byFormat: Array<[string, number]>;
     byTrainer: Array<[string, number, number]>;
   }>(null);
+
+  const allowedLocationIds = useMemo(
+    () => (!profile || profile.role === "admin" ? LOCATIONS.map((l) => l.id) : profile.locations),
+    [profile]
+  );
+  const visibleLocations = useMemo(() => LOCATIONS.filter((l) => allowedLocationIds.includes(l.id)), [allowedLocationIds]);
+
+  // Snap the current location + generation scope onto whatever this account is actually allowed to
+  // touch as soon as its profile resolves — the initial state above defaults to "every location" /
+  // "kwality" before the profile is known.
+  useEffect(() => {
+    setGenLocationIds(allowedLocationIds);
+    setLocationId((id) => (allowedLocationIds.includes(id) ? id : allowedLocationIds[0] ?? id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowedLocationIds]);
 
   // Gates the auto-save effect below until bootstrap has fully resolved, so it never mistakes a
   // cloud fetch echoing its own value back at itself for a real user edit.
@@ -303,10 +324,18 @@ export default function App() {
   }, []);
 
   const location = locationById(locationId);
-  const pinned = useMemo(() => bundle.sessions.filter((s) => s.pinned).map((s) => s.id), [bundle.sessions]);
+  // A branch account's view (and everything derived from it below — KPIs, workload, exports,
+  // multi-location/intra-city views) never includes sessions from a location outside its access,
+  // even though the underlying cloud blob still holds every location's data (see the app-level-only
+  // scoping decision — the DB itself isn't partitioned per location).
+  const scopedSessions = useMemo(
+    () => bundle.sessions.filter((s) => allowedLocationIds.includes(s.locationId)),
+    [bundle.sessions, allowedLocationIds]
+  );
+  const pinned = useMemo(() => scopedSessions.filter((s) => s.pinned).map((s) => s.id), [scopedSessions]);
   const all = useMemo(
-    () => applySchedule(bundle.sessions, { pinned, reassigned, optimized: false }),
-    [bundle.sessions, pinned, reassigned]
+    () => applySchedule(scopedSessions, { pinned, reassigned, optimized: false }),
+    [scopedSessions, pinned, reassigned]
   );
   const sessions = useMemo(() => all.filter((s) => s.locationId === locationId), [all, locationId]);
   const filteredSessions = useMemo(
@@ -624,6 +653,17 @@ export default function App() {
     setTimeout(() => setToast(null), 2200);
   }
 
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-white text-sm text-mist">
+        Loading...
+      </div>
+    );
+  }
+  if (!session || !profile) {
+    return <LoginView initialError={authError} />;
+  }
+
   return (
     <div className="min-h-screen bg-white text-ivory">
       <div className="grain" />
@@ -639,7 +679,7 @@ export default function App() {
           } w-[88px] flex-col border-r border-line bg-white/80 backdrop-blur-xl lg:flex`}
         >
           <div className="flex h-[72px] items-center justify-center border-b border-line">
-            <button onClick={() => { setView("grid"); setLocationId("kwality"); setSelectedId(null); setKpiKey(null); }} title="Home">
+            <button onClick={() => { setView("grid"); setLocationId(allowedLocationIds[0] ?? "kwality"); setSelectedId(null); setKpiKey(null); }} title="Home">
               <img
                 src={theme === "dark" ? "/images/athena-mark-dark.png" : "/images/athena-mark.png"}
                 alt="Athena"
@@ -718,7 +758,7 @@ export default function App() {
               value={locationId}
               onChange={setLocationId}
               className="shrink-0 whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs text-ivory ring-1 ring-line hover:text-mist"
-              options={LOCATIONS.map((loc) => ({
+              options={visibleLocations.map((loc) => ({
                 value: loc.id,
                 label: `${loc.name} · ${all.filter((s) => s.locationId === loc.id).length}`,
               }))}
@@ -764,7 +804,7 @@ export default function App() {
               </button>
               <MultiSelect
                 className="w-32 shrink-0"
-                options={LOCATIONS.map((l) => ({ value: l.id, label: l.name }))}
+                options={visibleLocations.map((l) => ({ value: l.id, label: l.name }))}
                 selected={genLocationIds}
                 onChange={setGenLocationIds}
                 placeholder="All locations"
@@ -790,6 +830,14 @@ export default function App() {
                 className="shrink-0 rounded-xl bg-white p-2 text-mist ring-1 ring-line hover:text-ivory"
               >
                 {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+              <button
+                onClick={() => signOut()}
+                title={profile ? `Signed in as ${profile.email} (${profile.role})` : "Sign out"}
+                aria-label="Sign out"
+                className="shrink-0 rounded-xl bg-white p-2 text-mist ring-1 ring-line hover:text-ivory"
+              >
+                <LogOut className="h-4 w-4" />
               </button>
             </div>
           </header>
@@ -821,7 +869,7 @@ export default function App() {
 
           <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3 lg:px-6">
             <div className="flex flex-wrap items-center gap-2">
-              {LOCATIONS.map((loc) => {
+              {visibleLocations.map((loc) => {
                 const active = loc.id === locationId;
                 const n = all.filter((s) => s.locationId === loc.id).length;
                 return (
@@ -1006,7 +1054,7 @@ export default function App() {
             {view === "analytics" && <AnalyticsView sessions={filteredSessions} all={filteredAll} metrics={kpisFor(filteredSessions, pinned)} onMetricSelect={setKpiKey} />}
             {view === "control" && <ControlView sessions={filteredSessions} onSelect={onSelect} report={bundle.report} />}
             {view === "settings" && (
-              <SettingsView settings={settings} setSettings={setSettings} onSave={() => persistSettings(settings)} />
+              <SettingsView settings={settings} setSettings={setSettings} onSave={() => persistSettings(settings)} allowedLocationIds={allowedLocationIds} />
             )}
             {view === "report" && <ReportView sessions={filteredSessions} locationName={location.name} all={filteredAll} />}
           </main>
