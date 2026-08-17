@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MessageCircle, Send, X } from "lucide-react";
+import { Eraser, MessageCircle, Send, X } from "lucide-react";
 import { DAYS, FORMATS, LOCATIONS, TIMES, TRAINERS, resolveLocationId, trainerById } from "./data";
 import type { Session, Settings } from "./types";
 import { historicFor, scoreCombo, generateSchedule, hasConflict, weekOffDays } from "./engine";
@@ -21,14 +21,19 @@ export function Chatbot({
 }) {
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
-  const [msgs, setMsgs] = useState<Msg[]>([
-    {
-      role: "bot",
-      text: "Ask me anything, or tell me what to change — add, remove, swap, substitute, reschedule, or optimize. I'll preview edits before they touch the live week. Examples: “add 3 classes at Kwality on Saturday”, “remove Sunday 18:15 Mat 57”, “swap Anisha with Reshma on Friday”, “optimize Supreme”.",
-    },
-  ]);
+  const greeting: Msg = {
+    role: "bot",
+    text: "Ask me anything, or tell me what to change — add, remove, swap, substitute, reschedule, or optimize. I'll preview edits before they touch the live week. Examples: “add 3 classes at Kwality on Saturday”, “remove Sunday 18:15 Mat 57”, “swap Anisha with Reshma on Friday”, “optimize Supreme”.",
+  };
+  const [msgs, setMsgs] = useState<Msg[]>([greeting]);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
+
+  function clearChat() {
+    setMsgs([greeting]);
+    setPending(null);
+    setInput("");
+  }
 
   function diffSummary(next: Session[]) {
     const beforeIds = new Set(all.map((s) => s.id));
@@ -120,9 +125,14 @@ export function Chatbot({
               <p className="text-sm font-medium">Athena assistant</p>
               <p className="text-[11px] text-mist">Answers anything and edits the live schedule (preview first)</p>
             </div>
-            <button onClick={() => setOpen(false)}>
-              <X className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={clearChat} title="Clear chat" aria-label="Clear chat">
+                <Eraser className="h-4 w-4" />
+              </button>
+              <button onClick={() => setOpen(false)} title="Close" aria-label="Close">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div className="flex-1 space-y-2 overflow-y-auto p-3">
             {msgs.map((m, i) => (
@@ -408,7 +418,7 @@ const TOOLS = [
       parameters: {
         type: "object",
         properties: {
-          location: { type: "string", description: "House/location name or id, optional (defaults to the currently viewed house)" },
+          location: { type: "string", description: "House/location name or id, optional — omit unless the user explicitly named a different house than the one currently in view" },
           day: { type: "string", description: "Day name, e.g. Monday..Sunday" },
           time: { type: "string", description: "24h time HH:MM" },
           className: { type: "string", description: "Class/format name" },
@@ -491,10 +501,12 @@ const TOOLS = [
   },
 ];
 
-function systemPrompt(snap: string) {
+function systemPrompt(locationName: string, locationId: string, snap: string, otherHouses: string) {
   return `You are Athena, an OpenAI-powered assistant inside a scheduling app. Answer any question the user asks, including questions outside Physique 57, in a clear, accurate, detailed, well-written manner. If current real-world facts may have changed, say you may need live verification because this app chat has no browser access.
 
 For schedule changes (add, remove, swap, substitute, reschedule, modify, optimize), call the matching tool instead of describing steps in text — tool calls are how edits actually happen. You can call multiple tools in one turn for compound requests (e.g. add three classes then swap one trainer). After tool calls run, write a short final natural-language summary in your reply.
+
+CURRENT HOUSE IN VIEW: ${locationName} (id: ${locationId}). Unless the user explicitly names a different house, every question and every tool call is about ${locationName} only — leave the "location" field empty on tool calls so it defaults there. The LIVE WEEK SNAPSHOT below lists ONLY ${locationName}'s own sessions; it is complete and authoritative for this house, so never say a class "doesn't exist" without checking it first, and never answer from another house's schedule when the user hasn't named one. Other houses exist too (${otherHouses}) — only look at one of those if the user names it, and say so in your reply when you switch.
 
 Use only these location ids/names: ${LOCATIONS.map((l) => `${l.id} (${l.name})`).join(", ")}.
 Use only these class names: ${FORMATS.map((f) => f.name).join(", ")}.
@@ -503,20 +515,28 @@ Never create Hosted, Foundations, or SWEAT In 30.
 Never claim an edit is already applied to the live week — it is only prepared for preview until the user clicks Apply.
 If a request is ambiguous, ask a clarifying question in your reply instead of guessing/calling a tool.
 
-LIVE WEEK SNAPSHOT:
+LIVE WEEK SNAPSHOT (${locationName} only):
 ${snap}`;
 }
 
 async function runAssistant(prompt: string, history: Msg[], all: Session[], settings: Settings, fallbackLoc: string): Promise<{ reply: string; next: Session[]; tokens: number }> {
   const key = settings.ai.openaiKey;
   const model = settings.ai.openaiModel || "gpt-4.1-mini";
-  const snap = all
+  const locationName = LOCATIONS.find((l) => l.id === fallbackLoc)?.name || fallbackLoc;
+  // Scoped to the house currently in view — mixing every house into one truncated snapshot let the
+  // model see a partial, arbitrarily-ordered slice that could omit the current house's own classes
+  // entirely, causing it to claim a class "doesn't exist" when it was just off-screen.
+  const scoped = all.filter((s) => s.locationId === fallbackLoc);
+  const snap = scoped
     .slice(0, 220)
-    .map((s) => `${s.id} | ${DAYS[s.day].full} ${s.time} | ${s.locationId} | ${s.studio} | ${s.name} | ${trainerById(s.trainerId).name} | avg ${s.avg} | fill ${s.fill}% | sessions ${s.sessions}`)
+    .map((s) => `${s.id} | ${DAYS[s.day].full} ${s.time} | ${s.studio} | ${s.name} | ${trainerById(s.trainerId).name} | avg ${s.avg} | fill ${s.fill}% | sessions ${s.sessions}`)
     .join("\n");
+  const otherHouses = LOCATIONS.filter((l) => l.id !== fallbackLoc)
+    .map((l) => `${l.name}: ${all.filter((s) => s.locationId === l.id).length} classes`)
+    .join(", ");
   const recent = history.slice(-8).map((m) => ({ role: m.role === "bot" ? "assistant" : "user", content: m.text }));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const messages: any[] = [{ role: "system", content: systemPrompt(snap) }, ...recent, { role: "user", content: prompt }];
+  const messages: any[] = [{ role: "system", content: systemPrompt(locationName, fallbackLoc, snap, otherHouses) }, ...recent, { role: "user", content: prompt }];
 
   let working = all;
   const notes: string[] = [];
