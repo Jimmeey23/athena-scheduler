@@ -1,5 +1,5 @@
 import { DAYS, FORMAT_PRIORITY, FORMATS, LOCATIONS, TIMES, TRAINERS as BASE_TRAINERS } from "./data";
-import { hasPerformance, lookupAgg, rankHistoricSlots } from "./performance";
+import { hasPerformance, lookupAgg, rankHistoricSlots, rankHistoricTimes } from "./performance";
 import { overrideBoost } from "./overrides";
 import type { Format, GenReport, Location, Session, Settings, Tag, Trainer } from "./types";
 
@@ -85,7 +85,9 @@ function shiftOf(t: string): "am" | "pm" {
   return toMin(t) < 13 * 60 ? "am" : "pm";
 }
 
-const PEAK_TIMES = ["07:15", "07:30", "08:00", "08:15", "08:30", "09:00", "09:15", "17:30", "18:00", "18:15", "18:30", "18:45", "19:00"];
+// Curated fallback for houses/days without enough historic rows yet to rank real prime times —
+// the general early-morning/lunchtime/evening pattern seen across almost every house.
+const PEAK_TIMES = ["07:15", "07:30", "08:00", "08:15", "08:30", "09:00", "09:15", "11:00", "17:30", "18:00", "18:15", "18:30", "18:45", "19:00", "19:15"];
 const SATURDAY_AM_TIMES = ["07:15", "07:30", "08:00", "08:15", "08:30", "09:00", "09:15", "10:15", "10:30", "11:00"];
 const SUNDAY_LAST_END = 19 * 60;
 const PRIME_WINDOWS: Record<string, Record<number, string[]>> = {
@@ -117,6 +119,19 @@ const PRIME_WINDOWS: Record<string, Record<number, string[]>> = {
     6: ["10:00", "17:00", "11:15"],
   },
 };
+
+// Every day of the week gets its own evidence-backed prime-time set, not just Saturday — ranked by
+// real check-in/fill composite at that house on that weekday, topped up with the curated manual
+// anchors (PRIME_WINDOWS) and the generic fallback pattern (PEAK_TIMES) wherever historic coverage
+// is thin. This is what the fill/repair passes below chase for parallel studio scheduling.
+function primeTimesForDay(locationId: string, day: number, settings: Settings) {
+  const historic = rankHistoricTimes(locationId, day, 3)
+    .filter((t) => t.sessions >= 3)
+    .slice(0, 6)
+    .map((t) => t.time);
+  const curated = PRIME_WINDOWS[locationId]?.[day] ?? [];
+  return [...new Set([...historic, ...curated, ...PEAK_TIMES])].filter((t) => allowedTime(day, t, settings));
+}
 
 function shiftTarget(locationId: string) {
   return locationId === "kwality" || locationId === "supreme" ? 0.6 : 0.5;
@@ -1105,7 +1120,7 @@ function repairWeeklyFloors(sessions: Session[], book: Book, settings: Settings,
       let placed = false;
       for (const day of days) {
         if (dayCount(sessions, loc.id, day.key) >= maxCount(settings, loc.id, day.key)) continue;
-        const anchors = PRIME_WINDOWS[loc.id]?.[day.key] ?? PEAK_TIMES;
+        const anchors = primeTimesForDay(loc.id, day.key, settings);
         const times = [...new Set([...anchors.flatMap(adjacentWindow), ...TIMES])];
         const families = loc.id === "kwality" ? ["Strength Lab", "PowerCycle", "Barre 57", "Mat 57", "FIT"] : loc.roomTypes?.cycle ? ["PowerCycle", "Barre 57", "Mat 57", "FIT"] : ["Barre 57", "Mat 57", "FIT", "Cardio Barre"];
         placed =
@@ -1125,7 +1140,7 @@ function repairPeakParallelSlots(sessions: Session[], book: Book, settings: Sett
   let added = 0;
   for (const loc of houses(settings).filter((l) => l.rooms.length > 1)) {
     for (const day of DAYS) {
-      const anchors = PRIME_WINDOWS[loc.id]?.[day.key] ?? PEAK_TIMES;
+      const anchors = primeTimesForDay(loc.id, day.key, settings);
       for (const anchor of shuffle(anchors, rand)) {
         const window = adjacentWindow(anchor);
         const families = loc.id === "kwality" ? ["Strength Lab", "PowerCycle", "Barre 57", "Mat 57", "FIT"] : loc.roomTypes?.cycle ? ["PowerCycle", "Barre 57", "Mat 57", "FIT"] : ["Barre 57", "Mat 57", "FIT", "Cardio Barre"];
@@ -1156,7 +1171,7 @@ function repairPeakSpecialtyRooms(sessions: Session[], book: Book, settings: Set
     if (!specialtyFamilies.length) continue;
     for (const day of DAYS) {
       for (const { names } of specialtyFamilies) {
-        const anchors = PRIME_WINDOWS[loc.id]?.[day.key] ?? PEAK_TIMES;
+        const anchors = primeTimesForDay(loc.id, day.key, settings);
         for (const anchor of shuffle(anchors, rand)) {
           const window = adjacentWindow(anchor);
           if (dayCount(sessions, loc.id, day.key) >= maxCount(settings, loc.id, day.key)) continue;
@@ -1410,14 +1425,19 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
   // left Supreme (whose roster is almost entirely shared with Kwality) unable to reach target.
   // Each round hands the next placement to whichever house is furthest behind its own target.
   for (const day of DAYS) {
-    const times = shuffle(TIMES.filter((t) => allowedTime(day.key, t, settings)), rand);
+    const allowedTimes = TIMES.filter((t) => allowedTime(day.key, t, settings));
     const plans = order.map((locationId) => {
       const tgt = settings.targets[locationId]?.[day.key] ?? { target: 1, max: 2 };
       const wobble = Math.floor(rand() * 5) - 1;
       const sparseMin = settings.ai.fillSparseHouses !== false && locationId === "supreme" ? (day.key === 6 ? 5 : 8) : 1;
       const want = Math.min(Math.max(optimize ? tgt.target : Math.max(tgt.target, tgt.target + wobble), sparseMin, 1), tgt.max);
       const rooms = houses(settings).find((l) => l.id === locationId)?.rooms.length ?? 1;
-      return { locationId, want: Math.min(want, tgt.max), max: tgt.max, rooms, guard: 0, stalled: false };
+      // Peak windows go first in each house's own attempt order — identified from its actual
+      // historic check-in/fill by time of day, every day of the week, not just Saturday — so the
+      // greedy fill packs studios full there before spreading into off-peak slots.
+      const peakSet = new Set(primeTimesForDay(locationId, day.key, settings));
+      const times = [...shuffle(allowedTimes.filter((t) => peakSet.has(t)), rand), ...shuffle(allowedTimes.filter((t) => !peakSet.has(t)), rand)];
+      return { locationId, want: Math.min(want, tgt.max), max: tgt.max, rooms, guard: 0, stalled: false, times };
     });
 
     const filledFor = (locationId: string) => sessions.filter((s) => s.locationId === locationId && s.day === day.key).length;
@@ -1438,7 +1458,7 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
         // cost it its place in the rotation.
         for (let attempt = 0; attempt < 8 && !placed && plan.guard < 140; attempt++) {
           plan.guard += 1;
-          const time = times[plan.guard % times.length];
+          const time = plan.times[plan.guard % plan.times.length];
           if (!settings.ai.allowParallel && book.rooms.has(`${day.key}|${time}|taken-any`)) continue;
           const progress = filled / Math.max(1, plan.want);
           const pick = pickCandidate(plan.locationId, day.key, time, settings, book, rand, optimize || plan.guard > 70, progress);
@@ -1464,7 +1484,7 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
       let relaxedTries = 0;
       while (filledFor(plan.locationId) < plan.want && relaxedTries < 24) {
         relaxedTries += 1;
-        const time = times[(plan.guard + relaxedTries) % times.length];
+        const time = plan.times[(plan.guard + relaxedTries) % plan.times.length];
         const pick = pickCandidate(plan.locationId, day.key, time, settings, book, rand, true, 1, true, {
           allowExperimental: experimentalQuotaOk(sessions, plan.locationId, settings),
         });
@@ -1488,7 +1508,7 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
       let extra = 0;
       while (filledFor(plan.locationId) < plan.max && extra < budget) {
         extra += 1;
-        const time = times[(plan.guard + extra) % times.length];
+        const time = plan.times[(plan.guard + extra) % plan.times.length];
         const pick = pickCandidate(plan.locationId, day.key, time, settings, book, rand, true);
         if (!pick || pick.score < bar) break;
         if (sessions.some((s) => s.locationId === plan.locationId && s.day === day.key && s.time === time && s.studio === pick.room)) continue;
@@ -1623,7 +1643,7 @@ function fitness(report: GenReport, sessions: Session[], settings: Settings) {
     }
     if (loc.rooms.length > 1) {
       for (const day of DAYS) {
-        for (const time of PEAK_TIMES) {
+        for (const time of primeTimesForDay(loc.id, day.key, settings)) {
           const current = sessions.filter((s) => s.locationId === loc.id && s.day === day.key && s.time === time).length;
           if (current === 1) parallelPenalty += loc.id === "kwality" ? 2.5 : 1.5;
         }

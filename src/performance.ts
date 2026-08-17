@@ -279,6 +279,28 @@ export function rankHistoricSlots(minSessions = 4, locationId?: string): RankedS
   return computeComposite(ranked).sort((a, b) => b.composite - a.composite);
 }
 
+export type RankedTime = { time: string; sessions: number; checkin: number; fill: number; composite: number };
+
+// Which times of day are actually busy for this house on this weekday, independent of class or
+// trainer — groups every row by time slot alone so a house's real prime hours surface from
+// evidence instead of a hand-picked, one-size-fits-all list.
+export function rankHistoricTimes(locationId: string, day: number, minSessions = 3): RankedTime[] {
+  const rows = STORE.filter((r) => isCurrentYearToDate(r.date) && r.locationId === locationId && r.dayKey === day);
+  const groups = new Map<string, PerfRow[]>();
+  for (const r of rows) {
+    const list = groups.get(r.time);
+    if (list) list.push(r);
+    else groups.set(r.time, [r]);
+  }
+  const ranked: Array<{ time: string; sessions: number; checkin: number; fill: number }> = [];
+  for (const [time, group] of groups) {
+    if (group.length < minSessions) continue;
+    const agg = aggregate(group);
+    ranked.push({ time, sessions: agg.sessions, checkin: agg.checkin, fill: agg.fill });
+  }
+  return computeComposite(ranked).sort((a, b) => b.composite - a.composite);
+}
+
 export function matchRows(
   rows: PerfRow[],
   opts: { locationId?: string; dayKey?: number; time?: string; className?: string; trainer?: string }
