@@ -42,7 +42,10 @@ const FALLBACK_LIMITS = { weeklyCap: 15, dailyHourCap: 4, barreMinShare: 0.25, e
 const FALLBACK_BANNED_FORMATS = ["Foundations", "Studio Foundations", "SWEAT In 30", "Studio SWEAT In 30", "Hosted", "Hosted Class", "Studio Hosted"];
 // A slot needs at least this many current-year-to-date sessions before its historic average is
 // trusted enough to force-schedule ahead of everything else.
-const TOP_SLOT_MIN_SESSIONS = 2;
+const TOP_SLOT_MIN_SESSIONS = 4;
+// Auto-pinned "proven top performer" slots can't eat more than half a house's scheduled week —
+// leaves room for the generic fill/quality passes to still shape the rest of the schedule.
+const PINNED_SESSION_SHARE_CAP = 0.5;
 function limitsOf(settings: Settings) {
   return settings.limits ?? FALLBACK_LIMITS;
 }
@@ -1328,7 +1331,15 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
   // heuristics. Marked pinned so no repair/refine pass downstream can remove one.
   const topSlotNotes: string[] = [];
   for (const loc of houses(settings)) {
+    const plannedWeekly = DAYS.reduce((sum, d) => sum + (settings.targets[loc.id]?.[d.key]?.target ?? 0), 0);
+    const pinnedCap = Math.floor(plannedWeekly * PINNED_SESSION_SHARE_CAP);
     for (const slot of rankHistoricSlots(TOP_SLOT_MIN_SESSIONS, loc.id)) {
+      if (sessions.filter((s) => s.locationId === loc.id && s.pinned).length >= pinnedCap) {
+        topSlotNotes.push(
+          `${loc.name} · ${DAYS[slot.day].label} ${slot.time} · ${slot.className} — proven top performer skipped: pinned-session cap (${pinnedCap}) reached for this house.`
+        );
+        continue;
+      }
       // slot.className carries the source sheet's raw casing/spacing (via cleanClass()), which does
       // not always match the catalog's canonical name exactly — every other historic lookup in this
       // file normalises before comparing class names; this one must too, or most slots silently fail

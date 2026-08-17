@@ -53,12 +53,13 @@ export function Chatbot({
       try {
         const result = await runAssistant(text, msgs, all, settings, locationId);
         const changed = diffSummary(result.next) !== "no changes";
+        const tokenNote = result.tokens ? `\n\n(${result.tokens.toLocaleString()} tokens used)` : "";
         if (changed) {
           setPending({ next: result.next, reply: result.reply });
-          setMsgs((m) => [...m, { role: "bot", text: `${result.reply}\n\nPreview: ${diffSummary(result.next)}. Apply this to the live week?` }]);
+          setMsgs((m) => [...m, { role: "bot", text: `${result.reply}\n\nPreview: ${diffSummary(result.next)}. Apply this to the live week?${tokenNote}` }]);
         } else {
           setPending(null);
-          setMsgs((m) => [...m, { role: "bot", text: result.reply }]);
+          setMsgs((m) => [...m, { role: "bot", text: `${result.reply}${tokenNote}` }]);
         }
         setBusy(false);
         return;
@@ -506,7 +507,7 @@ LIVE WEEK SNAPSHOT:
 ${snap}`;
 }
 
-async function runAssistant(prompt: string, history: Msg[], all: Session[], settings: Settings, fallbackLoc: string): Promise<{ reply: string; next: Session[] }> {
+async function runAssistant(prompt: string, history: Msg[], all: Session[], settings: Settings, fallbackLoc: string): Promise<{ reply: string; next: Session[]; tokens: number }> {
   const key = settings.ai.openaiKey;
   const model = settings.ai.openaiModel || "gpt-4.1-mini";
   const snap = all
@@ -519,6 +520,7 @@ async function runAssistant(prompt: string, history: Msg[], all: Session[], sett
 
   let working = all;
   const notes: string[] = [];
+  let tokens = 0;
 
   for (let i = 0; i < 6; i++) {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -528,12 +530,13 @@ async function runAssistant(prompt: string, history: Msg[], all: Session[], sett
     });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
+    tokens += Number(data.usage?.total_tokens ?? 0);
     const msg = data.choices?.[0]?.message;
     if (!msg) throw new Error("empty response from OpenAI");
     messages.push(msg);
     const calls = msg.tool_calls;
     if (!calls || !calls.length) {
-      return { reply: String(msg.content || "Done."), next: working };
+      return { reply: String(msg.content || "Done."), next: working, tokens };
     }
     for (const call of calls) {
       let args: ToolArgs = {};
@@ -567,5 +570,5 @@ async function runAssistant(prompt: string, history: Msg[], all: Session[], sett
       messages.push({ role: "tool", tool_call_id: call.id, content: outcome.result });
     }
   }
-  return { reply: notes.length ? `Prepared: ${notes.join("; ")}.` : "I could not complete that.", next: working };
+  return { reply: notes.length ? `Prepared: ${notes.join("; ")}.` : "I could not complete that.", next: working, tokens };
 }

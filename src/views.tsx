@@ -5,7 +5,7 @@ import { DAYS, LOCATIONS, TIMES, daysWithDates, locationById, trainerById, train
 import { weekOffDays } from "./engine";
 import { cleanClass, getPerformanceHeaders, getPerformanceRows, type PerfRow } from "./performance";
 import type { Session, Settings } from "./types";
-import { ClassCard, EmptySlot, FillBar, Panel, ScoreRing, TagChip, trainerWeekHours, type CardActions } from "./ui";
+import { ClassCard, EmptySlot, FillBar, Panel, ScoreRing, trainerWeekHours, type CardActions } from "./ui";
 
 function Tip({ active, payload, label }: { active?: boolean; payload?: Array<{ name: string; value: number; color: string }>; label?: string }) {
   if (!active || !payload?.length) return null;
@@ -23,7 +23,6 @@ function Tip({ active, payload, label }: { active?: boolean; payload?: Array<{ n
 
 export function GridView({
   sessions,
-  all,
   locationId,
   pinned,
   focusTrainer,
@@ -641,7 +640,7 @@ export function HeatmapView({ sessions }: { sessions: Session[] }) {
   );
 }
 
-export function RoomsView({ sessions, actions, all }: { sessions: Session[]; actions: CardActions; all: Session[] }) {
+export function RoomsView({ sessions, actions }: { sessions: Session[]; actions: CardActions; all: Session[] }) {
   const [day, setDay] = useState(() => {
     const today = new Date().getDay();
     return today === 0 ? 6 : today - 1; // Sunday (0) maps to DAYS index 6, Mon=0..Sat=5

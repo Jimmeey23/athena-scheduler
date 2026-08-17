@@ -316,7 +316,7 @@ export function kpisFor(sessions: Session[], pinned: string[]) {
     { key: "exp", label: "Experimental", value: `${experimental}`, hint: `${((experimental / n) * 100).toFixed(1)}%`, tone: experimental ? "warn" : "ivory" },
     { key: "con", label: "Constraints", value: `${constraints}`, hint: `${((constraints / n) * 100).toFixed(0)}% of slots`, tone: constraints ? "warn" : "ivory" },
     { key: "vio", label: "Violations", value: `${violations}`, hint: violations ? "needs review" : "clear", tone: violations ? "bad" : "good" },
-  ] as const;
+  ];
 }
 
 export function trainerLoad(sessions: Session[]) {
