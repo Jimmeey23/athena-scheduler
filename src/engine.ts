@@ -42,7 +42,7 @@ const FALLBACK_LIMITS = { weeklyCap: 15, dailyHourCap: 4, barreMinShare: 0.25, e
 const FALLBACK_BANNED_FORMATS = ["Foundations", "Studio Foundations", "SWEAT In 30", "Studio SWEAT In 30", "Hosted", "Hosted Class", "Studio Hosted"];
 // A slot needs at least this many current-year-to-date sessions before its historic average is
 // trusted enough to force-schedule ahead of everything else.
-const TOP_SLOT_MIN_SESSIONS = 4;
+const TOP_SLOT_MIN_SESSIONS = 2;
 function limitsOf(settings: Settings) {
   return settings.limits ?? FALLBACK_LIMITS;
 }
@@ -542,20 +542,16 @@ function canUseTrainer(
   const used = book.shift[dayKey];
   const locs = book.dayLocs[dayKey] || [];
   const crossHouse = locs.length > 0 && !locs.includes(locationId);
-  // Courtside and Copper are single-room boutiques staffed entirely by trainers whose main house is
-  // Kenkere. A trainer may cover one of them as a second house on the same day — but only in the
-  // shift they are not already working elsewhere, since nobody can be at two houses at once. The
-  // previous rule demanded that second house be in the *same* shift, which the physical
-  // one-house-per-shift check immediately below then rejected, so the exemption never fired once
-  // and both boutiques were left with a single class a week.
-  const boutiqueSecondHouse = crossHouse && (BOUTIQUE.has(locationId) || locs.every((l) => BOUTIQUE.has(l)));
+  // Hard rule: a trainer may only be booked into a second location on the same day if that second
+  // location is Copper & Cloves or Courtside, AND its class falls in the same shift as the trainer's
+  // other location that day — never a different shift, and never any other location as the second
+  // house.
+  const boutiqueSecondHouse = crossHouse && BOUTIQUE.has(locationId);
   if (crossHouse && !boutiqueSecondHouse) return "two-locations-day";
+  if (boutiqueSecondHouse && used && used !== sh) return "boutique-shift-mismatch";
   if (!opts.relaxSoft && settings.ai.enforceAmPm !== false && used && used !== sh && !boutiqueSecondHouse) return "am-pm-split";
   const locKey = `${t.id}|${day}|${sh}`;
-  if (book.locShift[locKey] && book.locShift[locKey] !== locationId) return "multi-location-shift";
-  // With the flag on, a boutique cover is only allowed as the trainer's *other* shift, never
-  // wedged into a shift they already spend at their main house.
-  if (boutiqueSecondHouse && settings.ai.boutiqueSameShiftOnly !== false && used === sh) return "boutique-shift-clash";
+  if (book.locShift[locKey] && book.locShift[locKey] !== locationId && !boutiqueSecondHouse) return "multi-location-shift";
   const cluster = book.shiftTrainers[`${locationId}|${day}|${sh}`] || [];
   // Specialty-room formats (PowerCycle/Strength Lab) run in their own dedicated single room, so
   // they don't compete for the other studios — exempt them from the shift-cluster cap, otherwise
@@ -1333,7 +1329,12 @@ function generateOnce(settings: Settings, seed: number, optimize: boolean, exter
   const topSlotNotes: string[] = [];
   for (const loc of houses(settings)) {
     for (const slot of rankHistoricSlots(TOP_SLOT_MIN_SESSIONS, loc.id)) {
-      const format = catalog(settings).find((f) => f.name === slot.className);
+      // slot.className carries the source sheet's raw casing/spacing (via cleanClass()), which does
+      // not always match the catalog's canonical name exactly — every other historic lookup in this
+      // file normalises before comparing class names; this one must too, or most slots silently fail
+      // to resolve a format and get skipped with no note at all.
+      const wanted = slot.className.trim().toLowerCase();
+      const format = catalog(settings).find((f) => f.name.trim().toLowerCase() === wanted);
       if (!format) continue;
       if (!formatAllowed(loc.id, format, settings)) continue;
       if (!allowedTime(slot.day, slot.time, settings) || !allowedEnd(slot.day, slot.time, format.duration)) continue;

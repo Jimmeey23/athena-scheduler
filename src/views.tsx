@@ -351,6 +351,7 @@ export function TrainerView({ sessions, onSelect, settings }: { sessions: Sessio
                               <div className="flex flex-col gap-1">
                                 {sessions
                                   .filter((s) => s.trainerId === t.id && s.day === d.key && s.locationId === l.id)
+                                  .sort((a, b) => a.time.localeCompare(b.time))
                                   .map((s) => (
                                     <button
                                       key={s.id}
@@ -1184,6 +1185,61 @@ const SOURCE_PAGE_SIZE = 50;
 const MIN_SESSIONS_DEFAULT = 1;
 const MIN_CHECKINS_DEFAULT = 0;
 
+type SortDir = "asc" | "desc";
+type SortState = { key: string; dir: SortDir } | null;
+
+function isNumericStr(s: string) {
+  return /^-?\d+(\.\d+)?$/.test(s.trim());
+}
+
+// Numeric-aware so columns like Revenue/Sessions sort by value, not lexicographically — but plain
+// text (trainer names, ISO dates) still gets a sensible string compare.
+function compareValues(a: unknown, b: unknown): number {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  const as = String(a ?? "");
+  const bs = String(b ?? "");
+  if (isNumericStr(as) && isNumericStr(bs)) return parseFloat(as) - parseFloat(bs);
+  return as.localeCompare(bs);
+}
+
+function sortByState<T extends Record<string, unknown>>(rows: T[], sort: SortState): T[] {
+  if (!sort) return rows;
+  const factor = sort.dir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => compareValues(a[sort.key], b[sort.key]) * factor);
+}
+
+// Click to sort ascending, click again to flip — third click on a different column just restarts at
+// descending for that column, matching how every other sortable table behaves.
+function SortTh({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  className = "",
+}: {
+  label: string;
+  sortKey: string;
+  sort: SortState;
+  onSort: (key: string) => void;
+  className?: string;
+}) {
+  const active = sort?.key === sortKey;
+  return (
+    <th
+      className={`cursor-pointer select-none whitespace-nowrap hover:text-ivory ${className}`}
+      onClick={() => onSort(sortKey)}
+    >
+      {label}
+      <span className="ml-0.5 inline-block w-2.5 text-[8px]">{active ? (sort!.dir === "desc" ? "▾" : "▴") : ""}</span>
+    </th>
+  );
+}
+
+function nextSortState(prev: SortState, key: string): SortState {
+  if (prev?.key === key) return { key, dir: prev.dir === "desc" ? "asc" : "desc" };
+  return { key, dir: "desc" };
+}
+
 type GroupMetrics = {
   key: string;
   label: string;
@@ -1303,7 +1359,7 @@ function isCurrentlyScheduled(sample: PerfRow, scheduled: Session[], matchTraine
     if (s.locationId !== sample.locationId) return false;
     if (s.day !== sample.dayKey) return false;
     if (s.time !== sample.time) return false;
-    if (cleanClass(s.name) !== cleanClass(sample.className)) return false;
+    if (cleanClass(s.name).toLowerCase() !== cleanClass(sample.className).toLowerCase()) return false;
     if (matchTrainer && trainerById(s.trainerId).name.toLowerCase() !== sample.trainer.toLowerCase()) return false;
     return true;
   });
@@ -1366,6 +1422,9 @@ function RawRowsDrilldown({ rows }: { rows: PerfRow[] }) {
 
 function GroupedMetricsTable({ groups, title }: { groups: GroupMetrics[]; title: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [sort, setSort] = useState<SortState>(null);
+  const onSort = (key: string) => setSort((prev) => nextSortState(prev, key));
+  const sorted = sortByState(groups, sort);
   const toggle = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -1381,24 +1440,24 @@ function GroupedMetricsTable({ groups, title }: { groups: GroupMetrics[]; title:
           <thead className="sticky top-0 z-10 bg-white">
             <tr className="text-[10px] uppercase tracking-wider text-mist">
               <th className="py-2 pl-3 pr-2"></th>
-              <th className="pr-2">Group</th>
-              <th className="pr-2">Sessions</th>
-              <th className="pr-2">Empty</th>
-              <th className="pr-2">Non-empty</th>
-              <th className="pr-2">Avg (incl.)</th>
-              <th className="pr-2">Avg (excl.)</th>
-              <th className="pr-2">Median</th>
-              <th className="pr-2">Peak</th>
-              <th className="pr-2">Fill</th>
-              <th className="pr-2">Booked</th>
-              <th className="pr-2">Late cancel</th>
-              <th className="pr-2">Revenue</th>
-              <th className="pr-2">₹/session</th>
-              <th className="pr-3">₹/check-in</th>
+              <SortTh label="Group" sortKey="label" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Sessions" sortKey="sessions" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Empty" sortKey="emptyClasses" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Non-empty" sortKey="nonEmptyClasses" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Avg (incl.)" sortKey="avgInclEmpty" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Avg (excl.)" sortKey="avgExclEmpty" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Median" sortKey="medianCheckin" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Peak" sortKey="peakCheckin" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Fill" sortKey="fill" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Booked" sortKey="avgBooked" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Late cancel" sortKey="lateCancelled" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Revenue" sortKey="revenue" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="₹/session" sortKey="revenuePerSession" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="₹/check-in" sortKey="revenuePerCheckin" sort={sort} onSort={onSort} className="pr-3" />
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
-            {groups.map((g) => (
+            {sorted.map((g) => (
               <Fragment key={g.key}>
                 <tr className="cursor-pointer even:bg-ink/40 hover:bg-ink" onClick={() => toggle(g.key)}>
                   <td className="py-1.5 pl-3 pr-2 text-mist">{expanded.has(g.key) ? "▾" : "▸"}</td>
@@ -1453,6 +1512,7 @@ function RankingTable({
 }) {
   const [n, setN] = useState<(typeof ROW_COUNT_OPTIONS)[number]>(10);
   const [side, setSide] = useState<"top" | "bottom">("top");
+  const [sortKey, setSortKey] = useState("composite");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const toggle = (key: string) =>
     setExpanded((prev) => {
@@ -1461,9 +1521,12 @@ function RankingTable({
       else next.add(key);
       return next;
     });
-  const sorted = [...allGroups].sort((a, b) => b.composite - a.composite);
+  // Top/bottom already gives both directions on whichever column is picked — descending here, then
+  // Top takes the front and Bottom takes (and reverses) the back, same as the default composite sort.
+  const sorted = sortByState(allGroups, { key: sortKey, dir: "desc" });
   const list = side === "top" ? sorted.slice(0, n) : sorted.slice(-n).reverse();
   const rankOf = (i: number) => (side === "top" ? i + 1 : sorted.length - i);
+  const sortProps = (key: string) => ({ sortKey: key, sort: { key: sortKey, dir: "desc" as const }, onSort: setSortKey });
 
   return (
     <Panel className="p-5">
@@ -1505,17 +1568,17 @@ function RankingTable({
               <th className="py-2 pl-3 pr-2">#</th>
               <th className="pr-2"></th>
               <th className="pr-2">Live</th>
-              <th className="pr-2">Slot</th>
-              <th className="pr-2">Score</th>
-              <th className="pr-2">Sessions</th>
-              <th className="pr-2">Avg (incl.)</th>
-              <th className="pr-2">Avg (excl.)</th>
-              <th className="pr-2">Median</th>
-              <th className="pr-2">Peak</th>
-              <th className="pr-2">Fill</th>
-              <th className="pr-2">Empty</th>
-              <th className="pr-2">Revenue</th>
-              <th className="pr-3">₹/session</th>
+              <SortTh label="Slot" {...sortProps("label")} className="pr-2" />
+              <SortTh label="Score" {...sortProps("composite")} className="pr-2" />
+              <SortTh label="Sessions" {...sortProps("sessions")} className="pr-2" />
+              <SortTh label="Avg (incl.)" {...sortProps("avgInclEmpty")} className="pr-2" />
+              <SortTh label="Avg (excl.)" {...sortProps("avgExclEmpty")} className="pr-2" />
+              <SortTh label="Median" {...sortProps("medianCheckin")} className="pr-2" />
+              <SortTh label="Peak" {...sortProps("peakCheckin")} className="pr-2" />
+              <SortTh label="Fill" {...sortProps("fill")} className="pr-2" />
+              <SortTh label="Empty" {...sortProps("emptyClasses")} className="pr-2" />
+              <SortTh label="Revenue" {...sortProps("revenue")} className="pr-2" />
+              <SortTh label="₹/session" {...sortProps("revenuePerSession")} className="pr-3" />
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
@@ -1592,6 +1655,9 @@ function MonthlyTable({ rows }: { rows: PerfRow[] }) {
   };
 
   const latest = months[months.length - 1];
+  const [sort, setSort] = useState<SortState>(null);
+  const onSort = (key: string) => setSort((prev) => nextSortState(prev, key));
+  const sortedMonths = sortByState(months, sort);
 
   return (
     <Panel className="p-5">
@@ -1607,26 +1673,26 @@ function MonthlyTable({ rows }: { rows: PerfRow[] }) {
         <table className="w-full text-left text-xs">
           <thead className="sticky top-0 z-10 bg-white">
             <tr className="text-[10px] uppercase tracking-wider text-mist">
-              <th className="py-2 pl-3 pr-2">Month</th>
-              <th className="pr-2">Sessions</th>
+              <SortTh label="Month" sortKey="key" sort={sort} onSort={onSort} className="py-2 pl-3 pr-2" />
+              <SortTh label="Sessions" sortKey="sessions" sort={sort} onSort={onSort} className="pr-2" />
               <th className="pr-2">vs prior</th>
-              <th className="pr-2">Empty</th>
-              <th className="pr-2">Non-empty</th>
-              <th className="pr-2">Avg (incl.)</th>
+              <SortTh label="Empty" sortKey="emptyClasses" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Non-empty" sortKey="nonEmptyClasses" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Avg (incl.)" sortKey="avgInclEmpty" sort={sort} onSort={onSort} className="pr-2" />
               <th className="pr-2">vs prior</th>
-              <th className="pr-2">Avg (excl.)</th>
-              <th className="pr-2">Median</th>
-              <th className="pr-2">Fill</th>
-              <th className="pr-2">Booked</th>
-              <th className="pr-2">Late cancel</th>
-              <th className="pr-2">Revenue</th>
+              <SortTh label="Avg (excl.)" sortKey="avgExclEmpty" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Median" sortKey="medianCheckin" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Fill" sortKey="fill" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Booked" sortKey="avgBooked" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Late cancel" sortKey="lateCancelled" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="Revenue" sortKey="revenue" sort={sort} onSort={onSort} className="pr-2" />
               <th className="pr-2">vs prior</th>
-              <th className="pr-2">₹/session</th>
-              <th className="pr-3">₹/check-in</th>
+              <SortTh label="₹/session" sortKey="revenuePerSession" sort={sort} onSort={onSort} className="pr-2" />
+              <SortTh label="₹/check-in" sortKey="revenuePerCheckin" sort={sort} onSort={onSort} className="pr-3" />
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
-            {months.map((m) => (
+            {sortedMonths.map((m) => (
               <tr key={m.key} className="even:bg-ink/40">
                 <td className="py-1.5 pl-3 pr-2 font-medium">{m.key}</td>
                 <td className="pr-2">{m.sessions}</td>
@@ -1735,9 +1801,17 @@ export function SourceDataView({ allowedLocationIds, scheduledSessions }: { allo
     }
   }, [filtered, groupBy]);
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / SOURCE_PAGE_SIZE));
+  const [rawSort, setRawSort] = useState<SortState>(null);
+  const onRawSort = (key: string) => setRawSort((prev) => nextSortState(prev, key));
+  const sortedFiltered = useMemo(() => {
+    if (!rawSort) return filtered;
+    const factor = rawSort.dir === "asc" ? 1 : -1;
+    return [...filtered].sort((a, b) => compareValues(a.raw[rawSort.key], b.raw[rawSort.key]) * factor);
+  }, [filtered, rawSort]);
+
+  const pageCount = Math.max(1, Math.ceil(sortedFiltered.length / SOURCE_PAGE_SIZE));
   const clampedPage = Math.min(page, pageCount - 1);
-  const paged = filtered.slice(clampedPage * SOURCE_PAGE_SIZE, (clampedPage + 1) * SOURCE_PAGE_SIZE);
+  const paged = sortedFiltered.slice(clampedPage * SOURCE_PAGE_SIZE, (clampedPage + 1) * SOURCE_PAGE_SIZE);
 
   const qualifies = (g: GroupMetrics) => g.sessions >= minSessions && g.avgInclEmpty >= minCheckins;
 
@@ -1889,7 +1963,7 @@ export function SourceDataView({ allowedLocationIds, scheduledSessions }: { allo
               <thead className="sticky top-0 z-10 bg-white">
                 <tr className="text-[10px] uppercase tracking-wider text-mist">
                   {headers.map((h) => (
-                    <th key={h} className="whitespace-nowrap py-2 pl-3 pr-4 first:pl-3">{h}</th>
+                    <SortTh key={h} label={h} sortKey={h} sort={rawSort} onSort={onRawSort} className="py-2 pl-3 pr-4 first:pl-3" />
                   ))}
                 </tr>
               </thead>

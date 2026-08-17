@@ -526,12 +526,20 @@ export function topTrainersForClass(className: string, limit = 3) {
 export async function loadGoogleSheet(token: string, spreadsheetId: string) {
   // "Teacher Recurring" is class×day×time×location×trainer grain — exactly what lookupAgg needs.
   // "Recurring" is the same grain without trainer (used as the classOnly/no-trainer fallback).
+  // "Sessions" (and the two generic fallback names below it) are true one-row-per-occurrence logs —
+  // exactly what every aggregation in this file assumes it's grouping. "Recurring" and "Teacher
+  // Recurring" LOOK similar (same column headers) but are actually spreadsheet-side rollups — one
+  // row per (slot) or (slot, trainer) with pre-computed all-time totals baked in, not per-date
+  // occurrences. Grouping THOSE by uniqueId1/uniqueId2 silently counts "how many distinct trainer
+  // rollup-rows fall in the date window" instead of real session counts — a large undercount. They're
+  // kept only as an absolute last resort, in case a future spreadsheet drops the raw sheet entirely.
+  // Open-ended column ranges (no row number) avoid ever silently truncating growing data again.
   const ranges = [
-    "Teacher Recurring!A1:AG20000",
-    "Recurring!A1:AG20000",
-    "Sessions!A1:Z20000",
-    "Sessions Performance Data!A1:Z20000",
-    "Sheet1!A1:Z20000",
+    "Sessions!A:Z",
+    "Sessions Performance Data!A:Z",
+    "Sheet1!A:Z",
+    "Recurring!A:AG",
+    "Teacher Recurring!A:AG",
   ];
   let lastErr = "No range worked";
   for (const range of ranges) {

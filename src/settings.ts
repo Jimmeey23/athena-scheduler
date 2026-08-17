@@ -171,7 +171,6 @@ export const DEFAULT_SETTINGS: Settings = {
     maxTrainersPerShift: 3,
     fillSparseHouses: true,
     noConsecutiveFormat: true,
-    boutiqueSameShiftOnly: true,
     autoWeekOffs: true,
     weekOffsPerTrainer: 2,
     openaiKey: "",

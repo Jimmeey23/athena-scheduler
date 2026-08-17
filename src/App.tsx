@@ -1085,7 +1085,7 @@ export default function App() {
             )}
             {view === "timeline" && <TimelineView sessions={filteredSessions} onSelect={onSelect} />}
             {view === "list" && <ListView sessions={filteredSessions} pinned={pinned} onSelect={onSelect} />}
-            {view === "trainer" && <TrainerView sessions={filteredSessions} onSelect={onSelect} settings={settings} />}
+            {view === "trainer" && <TrainerView sessions={filteredAll} onSelect={onSelect} settings={settings} />}
             {view === "multi" && (
               <MultiView all={all} actions={actions} focusTrainer={focusTrainer} focusFormats={focusFormats} onAdd={(loc, opt) => addFromHistoric(opt, loc)} onOpenCreate={(loc, day, time) => setCreateFor({ locationId: loc, day, time })} />
             )}

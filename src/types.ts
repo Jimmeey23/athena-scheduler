@@ -206,7 +206,6 @@ export type Settings = {
     maxTrainersPerShift: number;
     fillSparseHouses: boolean;
     noConsecutiveFormat: boolean;
-    boutiqueSameShiftOnly: boolean;
     autoWeekOffs: boolean;
     weekOffsPerTrainer: number;
     openaiKey: string;

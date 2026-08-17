@@ -862,7 +862,6 @@ export function SettingsView({
                   ["clusterTrainers", "Few trainers per shift (2–3)"],
                   ["fillSparseHouses", "Force Supreme daily minimums"],
                   ["noConsecutiveFormat", "No consecutive same format"],
-                  ["boutiqueSameShiftOnly", "Courtside/Copper cover in the spare shift only"],
                   ["autoWeekOffs", "Auto-assign week offs from load"],
                 ] as const
               ).map(([key, label]) => (
